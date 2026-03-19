@@ -284,13 +284,21 @@ export default function ApiGraph() {
     }
 
     const getLinkId = (nodeRef: any) => typeof nodeRef === 'object' ? nodeRef.id : nodeRef;
-    const nodesStrings = graphData.nodes.map(n => String(n.id));
-    const nodeDegrees = new Map<string, number>(nodesStrings.map(nodeId => [nodeId, 0]));
-    const edgesData = graphData.links.map((l: any) => ({
-      source: String(getLinkId(l.source)),
-      target: String(getLinkId(l.target)),
-      weight: l.callFrequency || 1
-    }));
+    const apiNodes = graphData.nodes
+      .map(node => String(node.id))
+      .filter(nodeId => apiById.has(nodeId));
+    const nodeDegrees = new Map<string, number>(apiNodes.map(nodeId => [nodeId, 0]));
+    const edgesData = graphData.links
+      .map((l: any) => ({
+        source: String(getLinkId(l.source)),
+        target: String(getLinkId(l.target)),
+        weight: l.callFrequency || 1
+      }))
+      .filter(edge => (
+        edge.source !== edge.target
+        && apiById.has(edge.source)
+        && apiById.has(edge.target)
+      ));
 
     edgesData.forEach(edge => {
       const weight = Math.max(1, edge.weight || 1);
@@ -298,11 +306,15 @@ export default function ApiGraph() {
       nodeDegrees.set(edge.target, (nodeDegrees.get(edge.target) || 0) + weight);
     });
 
-    const isolatedNodeIds = new Set(
-      nodesStrings.filter(nodeId => (nodeDegrees.get(nodeId) || 0) === 0)
-    );
+    const isolatedNodeIds = new Set<string>();
+    graphData.nodes.forEach(node => {
+      const nodeId = String(node.id);
+      if (!apiById.has(nodeId) || (nodeDegrees.get(nodeId) || 0) === 0) {
+        isolatedNodeIds.add(nodeId);
+      }
+    });
 
-    const communities = detectCommunities(nodesStrings, edgesData);
+    const communities = detectCommunities(apiNodes, edgesData);
     const clusterApiIds = new Map<string, string[]>();
     const clusterMemberIds = new Map<string, string[]>();
 
@@ -340,7 +352,10 @@ export default function ApiGraph() {
     if (
       groupBy === 'autoCluster'
       && focusedAutoClusterId
-      && !autoClusterData.clusterMemberIds.has(focusedAutoClusterId)
+      && (
+        focusedAutoClusterId === UNCLUSTERED_GROUP_ID
+        || !autoClusterData.clusterMemberIds.has(focusedAutoClusterId)
+      )
     ) {
       setFocusedAutoClusterId(null);
       setSelectedNode(null);
@@ -434,6 +449,11 @@ export default function ApiGraph() {
       if (groupBy === 'autoCluster') {
         targetGroupId = getAutoClusterGroupId(String(node.id), communities, isolatedNodeIds);
         targetGroupName = formatClusterName(targetGroupId);
+
+        // Keep isolated points out of the auto-cluster graph canvas.
+        if (targetGroupId === UNCLUSTERED_GROUP_ID) {
+          return;
+        }
       } else if (api && (groupBy === 'level4' || groupBy === 'level5')) {
         targetGroupId = String(api[groupBy as 'level4' | 'level5']) || 'Unknown';
         targetGroupName = `${groupBy.toUpperCase()}: ${targetGroupId}`;
@@ -982,7 +1002,7 @@ export default function ApiGraph() {
                     {upstreams.length > 0 ? (
                       <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.5 }}>
                         {(showAllDeps ? upstreams : upstreams.slice(0, 3)).map((n: any) => (
-                          <Typography key={n.id} variant="body2" sx={{ fontSize: '0.75rem', color: '#0f172a' }}>閳?{n.name}</Typography>
+                          <Typography key={n.id} variant="body2" sx={{ fontSize: '0.75rem', color: '#0f172a' }}>{n.name}</Typography>
                         ))}
                         {!showAllDeps && upstreams.length > 3 && (
                           <Typography variant="caption" color="primary" sx={{ cursor: 'pointer', fontWeight: 'bold' }} onClick={() => setShowAllDeps(true)}>
@@ -998,7 +1018,7 @@ export default function ApiGraph() {
                     {downstreams.length > 0 ? (
                       <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.5 }}>
                         {(showAllDeps ? downstreams : downstreams.slice(0, 3)).map((n: any) => (
-                          <Typography key={n.id} variant="body2" sx={{ fontSize: '0.75rem', color: '#0f172a' }}>閳?{n.name}</Typography>
+                          <Typography key={n.id} variant="body2" sx={{ fontSize: '0.75rem', color: '#0f172a' }}>{n.name}</Typography>
                         ))}
                         {!showAllDeps && downstreams.length > 3 && (
                           <Typography variant="caption" color="primary" sx={{ cursor: 'pointer', fontWeight: 'bold' }} onClick={() => setShowAllDeps(true)}>
@@ -1177,7 +1197,7 @@ export default function ApiGraph() {
               {upstreams.length > 0 ? (
                 <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.5 }}>
                   {(showAllDeps ? upstreams : upstreams.slice(0, 5)).map((n: any) => (
-                    <Typography key={n.id} variant="body2" sx={{ fontSize: '0.75rem', color: '#0f172a' }}>閳?{n.name}</Typography>
+                    <Typography key={n.id} variant="body2" sx={{ fontSize: '0.75rem', color: '#0f172a' }}>{n.name}</Typography>
                   ))}
                   {!showAllDeps && upstreams.length > 5 && (
                     <Typography variant="caption" color="primary" sx={{ cursor: 'pointer', fontWeight: 'bold' }} onClick={() => setShowAllDeps(true)}>
@@ -1193,7 +1213,7 @@ export default function ApiGraph() {
               {downstreams.length > 0 ? (
                 <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.5 }}>
                   {(showAllDeps ? downstreams : downstreams.slice(0, 5)).map((n: any) => (
-                    <Typography key={n.id} variant="body2" sx={{ fontSize: '0.75rem', color: '#0f172a' }}>閳?{n.name}</Typography>
+                    <Typography key={n.id} variant="body2" sx={{ fontSize: '0.75rem', color: '#0f172a' }}>{n.name}</Typography>
                   ))}
                   {!showAllDeps && downstreams.length > 5 && (
                     <Typography variant="caption" color="primary" sx={{ cursor: 'pointer', fontWeight: 'bold' }} onClick={() => setShowAllDeps(true)}>
