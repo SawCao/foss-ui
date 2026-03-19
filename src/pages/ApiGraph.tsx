@@ -26,6 +26,7 @@ const LARGE_GRAPH_NODE_THRESHOLD = 180;
 const LARGE_GRAPH_LINK_THRESHOLD = 320;
 const VERY_LARGE_GRAPH_NODE_THRESHOLD = 320;
 const VERY_LARGE_GRAPH_LINK_THRESHOLD = 700;
+const UNCLUSTERED_GROUP_ID = 'Unclustered';
 
 type DisplayNode = {
   id: string;
@@ -77,7 +78,23 @@ const getOrbitRadius = (node: Partial<DisplayNode>, maxDegree: number) => {
   return 300;
 };
 
-const formatClusterName = (groupId: string) => groupId.replace(/^AI-Cluster-/, 'AI Cluster ');
+const formatClusterName = (groupId: string) => (
+  groupId === UNCLUSTERED_GROUP_ID
+    ? UNCLUSTERED_GROUP_ID
+    : groupId.replace(/^AI-Cluster-/, 'AI Cluster ')
+);
+
+const getAutoClusterGroupId = (
+  nodeId: string,
+  communities: Record<string, number>,
+  isolatedNodeIds: Set<string>
+) => {
+  if (isolatedNodeIds.has(nodeId)) {
+    return UNCLUSTERED_GROUP_ID;
+  }
+
+  return `AI-Cluster-${communities[nodeId] || 0}`;
+};
 
 const buildExpandedClusterLayout = (nodes: DisplayNode[]): ExpandedClusterLayout | null => {
   if (nodes.length === 0) return null;
@@ -260,6 +277,7 @@ export default function ApiGraph() {
     if (groupBy !== 'autoCluster') {
       return {
         communities: {} as Record<string, number>,
+        isolatedNodeIds: new Set<string>(),
         clusterApiIds: new Map<string, string[]>(),
         clusterMemberIds: new Map<string, string[]>()
       };
@@ -267,28 +285,41 @@ export default function ApiGraph() {
 
     const getLinkId = (nodeRef: any) => typeof nodeRef === 'object' ? nodeRef.id : nodeRef;
     const nodesStrings = graphData.nodes.map(n => String(n.id));
+    const nodeDegrees = new Map<string, number>(nodesStrings.map(nodeId => [nodeId, 0]));
     const edgesData = graphData.links.map((l: any) => ({
       source: String(getLinkId(l.source)),
       target: String(getLinkId(l.target)),
       weight: l.callFrequency || 1
     }));
+
+    edgesData.forEach(edge => {
+      const weight = Math.max(1, edge.weight || 1);
+      nodeDegrees.set(edge.source, (nodeDegrees.get(edge.source) || 0) + weight);
+      nodeDegrees.set(edge.target, (nodeDegrees.get(edge.target) || 0) + weight);
+    });
+
+    const isolatedNodeIds = new Set(
+      nodesStrings.filter(nodeId => (nodeDegrees.get(nodeId) || 0) === 0)
+    );
+
     const communities = detectCommunities(nodesStrings, edgesData);
     const clusterApiIds = new Map<string, string[]>();
     const clusterMemberIds = new Map<string, string[]>();
 
     graphData.nodes.forEach(node => {
-      const groupId = `AI-Cluster-${communities[String(node.id)] || 0}`;
+      const nodeId = String(node.id);
+      const groupId = getAutoClusterGroupId(nodeId, communities, isolatedNodeIds);
 
       if (!clusterMemberIds.has(groupId)) {
         clusterMemberIds.set(groupId, []);
       }
-      clusterMemberIds.get(groupId)?.push(String(node.id));
+      clusterMemberIds.get(groupId)?.push(nodeId);
 
-      if (apiById.has(String(node.id))) {
+      if (apiById.has(nodeId)) {
         if (!clusterApiIds.has(groupId)) {
           clusterApiIds.set(groupId, []);
         }
-        clusterApiIds.get(groupId)?.push(String(node.id));
+        clusterApiIds.get(groupId)?.push(nodeId);
       } else if (!clusterApiIds.has(groupId)) {
         clusterApiIds.set(groupId, []);
       }
@@ -302,7 +333,7 @@ export default function ApiGraph() {
       });
     });
 
-    return { communities, clusterApiIds, clusterMemberIds };
+    return { communities, isolatedNodeIds, clusterApiIds, clusterMemberIds };
   }, [groupBy, graphData, apiById]);
 
   useEffect(() => {
@@ -387,6 +418,7 @@ export default function ApiGraph() {
     }
 
     const communities = groupBy === 'autoCluster' ? autoClusterData.communities : {};
+    const isolatedNodeIds = groupBy === 'autoCluster' ? autoClusterData.isolatedNodeIds : new Set<string>();
 
     const newNodes = new Map();
     const newLinks = new Map();
@@ -400,8 +432,7 @@ export default function ApiGraph() {
       let targetGroupName = '';
       
       if (groupBy === 'autoCluster') {
-        const clusterId = communities[String(node.id)] || 0;
-        targetGroupId = `AI-Cluster-${clusterId}`;
+        targetGroupId = getAutoClusterGroupId(String(node.id), communities, isolatedNodeIds);
         targetGroupName = formatClusterName(targetGroupId);
       } else if (api && (groupBy === 'level4' || groupBy === 'level5')) {
         targetGroupId = String(api[groupBy as 'level4' | 'level5']) || 'Unknown';
@@ -1219,13 +1250,13 @@ export default function ApiGraph() {
         <Card className="glass-panel" sx={{ px: 2, py: 0.5 }}>
           <Tabs value={groupBy} onChange={(_, val) => setGroupBy(val)} textColor="primary" indicatorColor="primary" 
             sx={{ minHeight: 40, '& .MuiTab-root': { minHeight: 40, py: 1 } }}>
-            <Tab label="Service Nodes" value="none" />
             <Tab 
               icon={<AutoAwesomeIcon sx={{ fontSize: '1rem', mr: 0.5, color: '#6366f1' }} />} 
               iconPosition="start" 
               label={<Typography fontWeight="bold" color="#6366f1">AI Autocluster</Typography>} 
               value="autoCluster" 
             />
+            <Tab label="Service Nodes" value="none" />
             <Tab label="Level 4 Clusters" value="level4" />
             <Tab label="Level 5 Clusters" value="level5" />
           </Tabs>
