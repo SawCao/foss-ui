@@ -176,7 +176,17 @@ export async function initializeMockData() {
   const flowLinks: GraphLink[] = [];
   parsedFlowData.forEach(row => {
     const sourceName = row['api'];
-    const targets = (row['outboundDependencies'] || '').split(';').map(s => s.trim()).filter(Boolean);
+    let targets: string[] = [];
+    try {
+      const depsVal = row['outboundDependencies'] || '[]';
+      // Handle cases where CSV double quotes inner quotes: ["api1","api2"] -> ["api1","api2"]
+      // PapaParse usually handles the outer quotes, but we might need to be careful with inner representation
+      targets = JSON.parse(depsVal);
+      if (!Array.isArray(targets)) targets = [];
+    } catch (e) {
+      // Fallback for old Format or malformed JSON
+      targets = (row['outboundDependencies'] || '').split(';').map((s: string) => s.trim()).filter(Boolean);
+    }
     
     if (sourceName && targets.length > 0) {
       const sourceId = getApiId(sourceName);

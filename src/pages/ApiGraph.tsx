@@ -264,19 +264,27 @@ export default function ApiGraph() {
       ctx.setLineDash([]);
     }
 
-    if (globalScale > 1.2) {
+    if (isSelected || (globalScale > 2 && !isAggregated)) {
+      // If we want to strictly follow "don't show", we should only show on selection.
+      // But usually some context is needed on high zoom. 
+      // Let's stick to "Only show on selection" to be safe with the user request.
+      if (isSelected) {
+        const fontSize = 14 / globalScale;
+        ctx.font = `600 ${fontSize}px Inter, sans-serif`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillStyle = '#0f172a';
+        ctx.fillText(label, node.x, node.y + size + fontSize + 2);
+      }
+    }
+    
+    if (isAggregated && globalScale > 1.5) {
       const fontSize = 12 / globalScale;
-      ctx.font = `${isSelected ? '600' : '500'} ${fontSize}px Inter, sans-serif`;
+      ctx.font = `600 ${fontSize * 0.75}px Inter, sans-serif`;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
-      ctx.fillStyle = '#0f172a';
-      ctx.fillText(label, node.x, node.y + size + fontSize + 2);
-      
-      if (isAggregated && globalScale > 1.5) {
-        ctx.font = `600 ${fontSize * 0.75}px Inter, sans-serif`;
-        ctx.fillStyle = isError ? '#ef4444' : '#64748b';
-        ctx.fillText(`[ ${node.size} Elements ]`, node.x, node.y + size + fontSize * 2.5);
-      }
+      ctx.fillStyle = isError ? '#ef4444' : '#64748b';
+      ctx.fillText(`[ ${node.size} Elements ]`, node.x, node.y + size + (isSelected ? 20 / globalScale : 5 / globalScale));
     }
   }, [selectedNode, groupBy]);
 
@@ -502,9 +510,11 @@ export default function ApiGraph() {
           graphData={displayGraphData}
           nodeCanvasObject={paintNode}
           nodePointerAreaPaint={(node, color, ctx) => {
+            const size = (node as any).val || 6;
             ctx.fillStyle = color;
             ctx.beginPath();
-            ctx.arc(node.x, node.y, (node as any).val || 6, 0, 2 * Math.PI, false);
+            // Increased hit area (min 15px radius) for better click reliability
+            ctx.arc(node.x, node.y, Math.max(size, 15), 0, 2 * Math.PI, false);
             ctx.fill();
           }}
           linkColor={() => 'rgba(148, 163, 184, 0.4)'}

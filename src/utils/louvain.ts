@@ -41,47 +41,57 @@ export function detectCommunities(nodes: string[], edges: Edge[]): Record<string
     // Pseudo-random resolution order
     const shuffledNodes = [...nodes].sort(() => Math.random() - 0.5);
 
-    for (const node of shuffledNodes) {
-      const currentCom = communities[node];
-      const neighbors = graph[node];
-      if (!neighbors) continue;
+    // Optimize sum_tot calculation by maintaining community sums
+      const communityDegrees: Record<number, number> = {};
+      nodes.forEach(n => {
+        const com = communities[n];
+        communityDegrees[com] = (communityDegrees[com] || 0) + degrees[n];
+      });
 
-      const comWeights: Record<number, number> = {};
-      for (const neighbor in neighbors) {
-        if (neighbor === node) continue;
-        const nCom = communities[neighbor];
-        comWeights[nCom] = (comWeights[nCom] || 0) + neighbors[neighbor];
-      }
+      for (const node of shuffledNodes) {
+        const currentCom = communities[node];
+        const neighbors = graph[node];
+        if (!neighbors) continue;
 
-      let bestCom = currentCom;
-      let maxModularityGain = 0;
-      const k_i = degrees[node];
+        const comWeights: Record<number, number> = {};
+        for (const neighbor in neighbors) {
+          if (neighbor === node) continue;
+          const nCom = communities[neighbor];
+          comWeights[nCom] = (comWeights[nCom] || 0) + neighbors[neighbor];
+        }
 
-      // Evaluate Q gain for all neighbor communities
-      for (const comStr in comWeights) {
-        const com = parseInt(comStr);
-        if (com === currentCom) continue;
+        let bestCom = currentCom;
+        let maxModularityGain = 0;
+        const k_i = degrees[node];
 
-        let sum_tot = 0;
-        nodes.forEach(n => {
-          if (communities[n] === com) sum_tot += degrees[n];
-        });
+        // Evaluate Q gain for all neighbor communities
+        for (const comStr in comWeights) {
+          const com = parseInt(comStr);
+          if (com === currentCom) continue;
 
-        const k_i_in = comWeights[com];
-        // Simplified gain formula
-        const gain = k_i_in - (k_i * sum_tot) / m2;
+          // Optimized: use pre-calculated community surface
+          const sum_tot = communityDegrees[com] || 0;
+          const k_i_in = comWeights[com];
+          
+          // Simplified modularity gain formula: ΔQ = [ (Σin + 2ki,in)/2m - ((Σtot + ki)/2m)^2 ] - [ Σin/2m - (Σtot/2m)^2 - (ki/2m)^2 ]
+          // Which simplifies for a single node moving to: gain = ki,in - (ki * Σtot) / m
+          const gain = k_i_in - (k_i * sum_tot) / m2;
 
-        if (gain > maxModularityGain) {
-          maxModularityGain = gain;
-          bestCom = com;
+          if (gain > maxModularityGain) {
+            maxModularityGain = gain;
+            bestCom = com;
+          }
+        }
+
+        if (bestCom !== currentCom && maxModularityGain > 0) {
+          // Update community degrees mapping
+          communityDegrees[currentCom] -= k_i;
+          communityDegrees[bestCom] = (communityDegrees[bestCom] || 0) + k_i;
+          
+          communities[node] = bestCom;
+          changed = true;
         }
       }
-
-      if (bestCom !== currentCom && maxModularityGain > 0) {
-        communities[node] = bestCom;
-        changed = true;
-      }
-    }
   }
   
   // Re-index clusters to consecutive IDs
