@@ -78,14 +78,12 @@ export function mapCsvRowToApiItem(row: Record<string, any>): ApiItem {
   let scanStatus: ScanStatus = 'success';
   if (String(row['status_is_error']) === 'true' || String(row['plugin_status_is_error']) === 'true') {
      scanStatus = 'failed';
-  } else if (issueCount > 0) {
-     scanStatus = 'failed';
-  }
+   }
   
   const name = row['API name'] || row['PI name'] || 'Unknown API';
   
   return {
-    id: row['EIM No'] || name.toLowerCase().replace(/\s+/g, '-'),
+    id: `${row['EIM No'] || 'no-eim'}-${(name).toLowerCase().replace(/\s+/g, '-')}`,
     name: name,
     platform: row['Platform'] || 'Unknown',
     level3: row['Level 3'] || 'Unknown',
@@ -162,7 +160,7 @@ export async function initializeMockData() {
   mockFixSummaries = mockApis.slice(0, 5).map((api, i) => ({
     id: `fix-${i + 1}`,
     apiId: api.id,
-    issueName: `NullPointerException in ${api.name} handler`,
+    issueName: `org.springframework:spring-core:5.0.18.RELEASE`,
     summary: `Automated fix applied by Agent. Verified guards on payload.`,
     date: '2026-03-18'
   }));

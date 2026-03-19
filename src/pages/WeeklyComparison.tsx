@@ -66,8 +66,10 @@ export default function WeeklyComparison() {
     const previous = snapshots.find(s => s.id === baseSnapId);
     if (!latest || !previous) return null;
 
+    const isSelfComparison = currentSnapId === baseSnapId;
+
     const data = latest.data.map(currentApi => {
-      const prevApi = previous.data.find(p => p.id === currentApi.id);
+      const prevApi = isSelfComparison ? currentApi : previous.data.find(p => p.id === currentApi.id);
       const prevIssues = prevApi ? prevApi.issueCount : 0;
       const currentIssues = currentApi.issueCount;
       const diff = currentIssues - prevIssues;
