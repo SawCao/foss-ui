@@ -1,7 +1,8 @@
-import apiFlowCsvRaw from './api_flow.csv?raw';
+import Papa from 'papaparse';
 
-// Eagerly import all api_scan_*.csv files as raw strings
-const scanFiles = import.meta.glob('./api_scan_*.csv', { query: '?raw', import: 'default', eager: true }) as Record<string, string>;
+// We don't use ?raw here anymore so we can fetch them or import them dynamically
+const scanFilesGlob = import.meta.glob('./api_scan_*.csv', { query: '?raw', import: 'default', eager: false });
+const apiFlowGlob = import.meta.glob('./api_flow.csv', { query: '?raw', import: 'default', eager: false });
 
 export type ScanStatus = 'success' | 'failed' | 'in_progress' | 'waiting';
 export type ApiAction = 'A' | 'B' | 'C';
@@ -51,17 +52,22 @@ export interface GraphLink {
   callFrequency: number;
 }
 
-function parseCSV(csvString: string): Record<string, string>[] {
-  const lines = csvString.trim().split('\n');
-  if (lines.length === 0) return [];
-  const headers = lines[0].split(',').map(h => h.trim());
-  return lines.slice(1).map(line => {
-    // Basic CSV split, assumes no commas inside values for this mock
-    const values = line.split(',');
-    return headers.reduce((obj, header, i) => {
-      obj[header] = values[i] ? values[i].trim() : '';
-      return obj;
-    }, {} as Record<string, string>);
+/**
+ * Async helper to parse CSV string using PapaParse Worker
+ */
+async function parseCSVAsync(csvString: string): Promise<Record<string, string>[]> {
+  return new Promise((resolve, reject) => {
+    Papa.parse(csvString, {
+      header: true,
+      skipEmptyLines: true,
+      worker: true, // Use Web Worker
+      complete: (results) => {
+        resolve(results.data as Record<string, string>[]);
+      },
+      error: (error: any) => {
+        reject(error);
+      }
+    });
   });
 }
 
@@ -95,97 +101,127 @@ export function mapCsvRowToApiItem(row: Record<string, any>): ApiItem {
   };
 }
 
-const parsedFlowData = parseCSV(apiFlowCsvRaw);
+// Initial empty state
+export let mockSnapshots: Snapshot[] = [];
+export let mockApis: ApiItem[] = [];
+export let mockFixSummaries: AgentFixSummary[] = [];
+export let mockGraphData = { nodes: [] as GraphNode[], links: [] as GraphLink[] };
 
-export const mockSnapshots: Snapshot[] = [];
-
-Object.entries(scanFiles).forEach(([path, content]) => {
-  const match = path.match(/api_scan_(.*?)\.csv/);
-  const dateStr = match ? match[1] : 'unknown';
-  
-  let formattedDate = dateStr;
-  if (/^\d{8}$/.test(dateStr)) {
-    formattedDate = `${dateStr.slice(0, 4)}-${dateStr.slice(4, 6)}-${dateStr.slice(6, 8)}`;
+/**
+ * Main initialization function to load and parse all data asynchronously
+ */
+export async function initializeMockData() {
+  // 1. Load Flow Data
+  const flowKeys = Object.keys(apiFlowGlob);
+  let parsedFlowData: Record<string, string>[] = [];
+  if (flowKeys.length > 0) {
+    const apiFlowCsvRaw = await (apiFlowGlob[flowKeys[0]]() as Promise<string>);
+    parsedFlowData = await parseCSVAsync(apiFlowCsvRaw);
   }
 
-  const parsedData = parseCSV(content);
-  const apiItems: ApiItem[] = parsedData.map(row => {
-    const item = mapCsvRowToApiItem(row);
-    const actionIndex = item.name.length % 3;
-    item.action = ['A', 'B', 'C'][actionIndex] as ApiAction;
-    return item;
-  });
-
-  mockSnapshots.push({
-    id: `snap-${dateStr}`,
-    date: formattedDate,
-    data: apiItems
-  });
-});
-
-// Sort snapshots by date descending
-mockSnapshots.sort((a, b) => b.date.localeCompare(a.date));
-
-// Default mockApis to the latest snapshot
-export const mockApis: ApiItem[] = mockSnapshots.length > 0 ? mockSnapshots[0].data : [];
-
-export const mockFixSummaries: AgentFixSummary[] = mockApis.slice(0, 5).map((api, i) => ({
-  id: `fix-${i + 1}`,
-  apiId: api.id,
-  issueName: `NullPointerException in ${api.name} handler`,
-  summary: `Automated fix applied by Agent. Verified guards on payload.`,
-  date: '2026-03-18'
-}));
-
-const getApiId = (name: string) => {
-  const found = mockApis.find(a => a.name === name);
-  return found ? found.id : name.toLowerCase().replace(/\s+/g, '-');
-};
-
-const flowLinks: GraphLink[] = [];
-parsedFlowData.forEach(row => {
-  const sourceName = row['api'];
-  const targets = (row['outboundDependencies'] || '').split(';').map(s => s.trim()).filter(Boolean);
+  // 2. Load and Parse Scan Files
+  mockSnapshots = [];
+  const scanEntries = Object.entries(scanFilesGlob);
   
-  if (sourceName && targets.length > 0) {
-    const sourceId = getApiId(sourceName);
-    targets.forEach(targetName => {
-      flowLinks.push({
-        source: sourceId,
-        target: getApiId(targetName),
-        value: 1,
-        callFrequency: 1 // Call volume forced to 1
+  for (const [path, importFn] of scanEntries) {
+    const match = path.match(/api_scan_(.*?)\.csv/);
+    const dateStr = match ? match[1] : 'unknown';
+    
+    let formattedDate = dateStr;
+    if (/^\d{8}$/.test(dateStr)) {
+      formattedDate = `${dateStr.slice(0, 4)}-${dateStr.slice(4, 6)}-${dateStr.slice(6, 8)}`;
+    }
+
+    const content = await (importFn() as Promise<string>);
+    const parsedData = await parseCSVAsync(content);
+    
+    const apiItems: ApiItem[] = parsedData.map(row => {
+      const item = mapCsvRowToApiItem(row);
+      const actionIndex = (item.name || '').length % 3;
+      item.action = ['A', 'B', 'C'][actionIndex] as ApiAction;
+      return item;
+    });
+
+    mockSnapshots.push({
+      id: `snap-${dateStr}`,
+      date: formattedDate,
+      data: apiItems
+    });
+  }
+
+  // Sort snapshots by date descending
+  mockSnapshots.sort((a, b) => b.date.localeCompare(a.date));
+  
+  // Set latest apis
+  mockApis = mockSnapshots.length > 0 ? mockSnapshots[0].data : [];
+
+  // 3. Generate Mock Fix Summaries
+  mockFixSummaries = mockApis.slice(0, 5).map((api, i) => ({
+    id: `fix-${i + 1}`,
+    apiId: api.id,
+    issueName: `NullPointerException in ${api.name} handler`,
+    summary: `Automated fix applied by Agent. Verified guards on payload.`,
+    date: '2026-03-18'
+  }));
+
+  // 4. Build Graph Data
+  const getApiId = (name: string) => {
+    const found = mockApis.find(a => a.name === name);
+    return found ? found.id : name.toLowerCase().replace(/\s+/g, '-');
+  };
+
+  const flowLinks: GraphLink[] = [];
+  parsedFlowData.forEach(row => {
+    const sourceName = row['api'];
+    const targets = (row['outboundDependencies'] || '').split(';').map(s => s.trim()).filter(Boolean);
+    
+    if (sourceName && targets.length > 0) {
+      const sourceId = getApiId(sourceName);
+      targets.forEach(targetName => {
+        flowLinks.push({
+          source: sourceId,
+          target: getApiId(targetName),
+          value: 1,
+          callFrequency: 1
+        });
       });
-    });
-  }
-});
-
-const graphNodeIds = new Set<string>();
-const graphNodes: GraphNode[] = [];
-
-mockApis.forEach(api => {
-  graphNodeIds.add(api.id);
-  graphNodes.push({
-    id: api.id,
-    name: api.name,
-    group: api.action === 'A' ? 1 : api.action === 'B' ? 2 : 3,
-    hasIssues: api.issueCount > 0
+    }
   });
-});
 
-flowLinks.forEach(link => {
-  if (!graphNodeIds.has(link.target)) {
-    graphNodeIds.add(link.target);
+  const graphNodeIds = new Set<string>();
+  const graphNodes: GraphNode[] = [];
+
+  mockApis.forEach(api => {
+    graphNodeIds.add(api.id);
     graphNodes.push({
-      id: link.target,
-      name: link.target.split('-').map(s => s.charAt(0).toUpperCase() + s.slice(1)).join(' '),
-      group: 4,
-      hasIssues: false
+      id: api.id,
+      name: api.name,
+      group: api.action === 'A' ? 1 : api.action === 'B' ? 2 : 3,
+      hasIssues: api.issueCount > 0
     });
-  }
-});
+  });
 
-export const mockGraphData = {
-  nodes: graphNodes,
-  links: flowLinks
-};
+  flowLinks.forEach(link => {
+    if (!graphNodeIds.has(link.target)) {
+      graphNodeIds.add(link.target);
+      graphNodes.push({
+        id: link.target,
+        name: link.target.split('-').map(s => s.charAt(0).toUpperCase() + s.slice(1)).join(' '),
+        group: 4,
+        hasIssues: false
+      });
+    }
+  });
+
+  mockGraphData = {
+    nodes: graphNodes,
+    links: flowLinks
+  };
+
+  return {
+    apis: mockApis,
+    snapshots: mockSnapshots,
+    fixSummaries: mockFixSummaries,
+    graphData: mockGraphData
+  };
+}

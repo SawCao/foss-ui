@@ -6,7 +6,16 @@ import ApiGraph from './pages/ApiGraph';
 import ApiDetails from './pages/ApiDetails';
 import BatchSummaries from './pages/BatchSummaries';
 
+import { useEffect } from 'react';
+import { useStore } from './store/useStore';
+
 function App() {
+  const { loadLatestData } = useStore();
+
+  useEffect(() => {
+    loadLatestData();
+  }, [loadLatestData]);
+
   return (
     <HashRouter>
       <Routes>

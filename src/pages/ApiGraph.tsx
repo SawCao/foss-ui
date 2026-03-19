@@ -1,5 +1,5 @@
 import { useRef, useEffect, useState, useMemo, useCallback } from 'react';
-import { Box, Typography, Card, CardContent, Tabs, Tab, IconButton, Divider, Button, Chip } from '@mui/material';
+import { Box, Typography, Card, CardContent, Tabs, Tab, IconButton, Divider, Button, Chip, CircularProgress } from '@mui/material';
 import ForceGraph2D from 'react-force-graph-2d';
 import { useStore } from '../store/useStore';
 import { useNavigate } from 'react-router-dom';
@@ -16,7 +16,7 @@ import { detectCommunities } from '../utils/louvain';
 import { forceCollide, forceRadial } from 'd3-force';
 
 export default function ApiGraph() {
-  const { graphData, apis } = useStore();
+  const { graphData, apis, isLoading } = useStore();
   const navigate = useNavigate();
   const containerRef = useRef<HTMLDivElement>(null);
   const fgRef = useRef<any>(null);
@@ -29,6 +29,15 @@ export default function ApiGraph() {
   useEffect(() => {
     setShowAllDeps(false);
   }, [selectedNode]);
+
+  if (isLoading && apis.length === 0) {
+    return (
+      <Box sx={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '60vh', gap: 2 }}>
+        <CircularProgress size={60} />
+        <Typography variant="h6" color="text.secondary">Loading complex topology...</Typography>
+      </Box>
+    );
+  }
 
   useEffect(() => {
     const handleResize = () => {

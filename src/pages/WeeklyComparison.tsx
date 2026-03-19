@@ -1,5 +1,5 @@
 import { useState, useMemo, useEffect } from 'react';
-import { Box, Typography, Card, CardContent, Table, TableBody, TableCell, TableContainer, TableHead, TableRow, Chip, TextField, MenuItem, Tabs, Tab, TableSortLabel } from '@mui/material';
+import { Box, Typography, Card, CardContent, Table, TableBody, TableCell, TableContainer, TableHead, TableRow, Chip, TextField, MenuItem, Tabs, Tab, TableSortLabel, CircularProgress } from '@mui/material';
 import { useStore } from '../store/useStore';
 import TrendingUpIcon from '@mui/icons-material/TrendingUp';
 import TrendingDownIcon from '@mui/icons-material/TrendingDown';
@@ -31,7 +31,7 @@ function ProgressCell({ prev, curr }: { prev: number, curr: number }) {
 }
 
 export default function WeeklyComparison() {
-  const { snapshots, apis } = useStore();
+  const { snapshots, apis, isLoading } = useStore();
 
   const [filterLevel3, setFilterLevel3] = useState('');
   const [filterLevel4, setFilterLevel4] = useState('');
@@ -184,6 +184,15 @@ export default function WeeklyComparison() {
     }
     return { totalFixed: tf, totalWorsened: tw, netChange: nc };
   }, [displayData, groupBy]);
+
+  if (isLoading && apis.length === 0) {
+    return (
+      <Box sx={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '60vh', gap: 2 }}>
+        <CircularProgress size={60} />
+        <Typography variant="h6" color="text.secondary">Computing historical data trends...</Typography>
+      </Box>
+    );
+  }
 
   if (!rawComparisonData) return <Typography sx={{ p: 4 }}>Not enough data for comparison.</Typography>;
 

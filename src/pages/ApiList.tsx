@@ -1,5 +1,5 @@
-import { useState, useMemo } from 'react';
-import { Box, Typography, Card, CardContent, TextField, MenuItem, Table, TableBody, TableCell, TableContainer, TableHead, TableRow, Chip, IconButton, Tooltip, Link, Menu, Checkbox, ListItemText, Divider } from '@mui/material';
+import { useState, useMemo, useDeferredValue } from 'react';
+import { Box, Typography, Card, CardContent, TextField, MenuItem, Table, TableBody, TableCell, TableContainer, TableHead, TableRow, Chip, IconButton, Tooltip, Link, Menu, Checkbox, ListItemText, Divider, TablePagination, CircularProgress } from '@mui/material';
 import { useStore } from '../store/useStore';
 import { Link as RouterLink } from 'react-router-dom';
 import BugReportIcon from '@mui/icons-material/BugReport';
@@ -20,27 +20,40 @@ const statusConfig = {
 } as const;
 
 export default function ApiList() {
-  const { apis } = useStore();
+  const { apis, isLoading } = useStore();
   const [filterLevel3, setFilterLevel3] = useState('');
   const [filterLevel4, setFilterLevel4] = useState('');
   const [filterLevel5, setFilterLevel5] = useState('');
-  
   const [filterStatus, setFilterStatus] = useState<string[]>([]);
+  
+  const [page, setPage] = useState(0);
+  const [rowsPerPage, setRowsPerPage] = useState(25);
+  
   const [anchorEl, setAnchorEl] = useState<null | HTMLElement>(null);
 
+  // Defer filter values to keep inputs responsive
+  const deferredLevel3 = useDeferredValue(filterLevel3);
+  const deferredLevel4 = useDeferredValue(filterLevel4);
+  const deferredLevel5 = useDeferredValue(filterLevel5);
+  const deferredStatus = useDeferredValue(filterStatus);
+
   const level3Options = useMemo(() => [...new Set(apis.map(api => api.level3))], [apis]);
-  const level4Options = useMemo(() => Array.from(new Set(apis.filter(a => !filterLevel3 || a.level3 === filterLevel3).map(a => a.level4))), [apis, filterLevel3]);
-  const level5Options = useMemo(() => Array.from(new Set(apis.filter(a => (!filterLevel3 || a.level3 === filterLevel3) && (!filterLevel4 || a.level4 === filterLevel4)).map(a => a.level5))), [apis, filterLevel3, filterLevel4]);
+  const level4Options = useMemo(() => Array.from(new Set(apis.filter(a => !deferredLevel3 || a.level3 === deferredLevel3).map(a => a.level4))), [apis, deferredLevel3]);
+  const level5Options = useMemo(() => Array.from(new Set(apis.filter(a => (!deferredLevel3 || a.level3 === deferredLevel3) && (!deferredLevel4 || a.level4 === deferredLevel4)).map(a => a.level5))), [apis, deferredLevel3, deferredLevel4]);
 
   const filteredApis = useMemo(() => {
     return apis.filter(api => {
-      if (filterLevel3 && api.level3 !== filterLevel3) return false;
-      if (filterLevel4 && api.level4 !== filterLevel4) return false;
-      if (filterLevel5 && api.level5 !== filterLevel5) return false;
-      if (filterStatus.length > 0 && !filterStatus.includes(api.scanStatus)) return false;
+      if (deferredLevel3 && api.level3 !== deferredLevel3) return false;
+      if (deferredLevel4 && api.level4 !== deferredLevel4) return false;
+      if (deferredLevel5 && api.level5 !== deferredLevel5) return false;
+      if (deferredStatus.length > 0 && !deferredStatus.includes(api.scanStatus)) return false;
       return true;
     });
-  }, [apis, filterLevel3, filterLevel4, filterLevel5, filterStatus]);
+  }, [apis, deferredLevel3, deferredLevel4, deferredLevel5, deferredStatus]);
+
+  const paginatedApis = useMemo(() => {
+    return filteredApis.slice(page * rowsPerPage, page * rowsPerPage + rowsPerPage);
+  }, [filteredApis, page, rowsPerPage]);
 
   const summary = useMemo(() => {
     return {
@@ -59,6 +72,24 @@ export default function ApiList() {
   const toggleStatusFilter = (status: string) => {
     setFilterStatus(prev => prev.includes(status) ? prev.filter(s => s !== status) : [...prev, status]);
   };
+
+  const handleChangePage = (_: unknown, newPage: number) => {
+    setPage(newPage);
+  };
+
+  const handleChangeRowsPerPage = (event: React.ChangeEvent<HTMLInputElement>) => {
+    setRowsPerPage(parseInt(event.target.value, 10));
+    setPage(0);
+  };
+
+  if (isLoading && apis.length === 0) {
+    return (
+      <Box sx={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '60vh', gap: 2 }}>
+        <CircularProgress size={60} />
+        <Typography variant="h6" color="text.secondary">Initializing large dataset with Web Workers...</Typography>
+      </Box>
+    );
+  }
 
   return (
     <Box className="page-container">
@@ -91,15 +122,15 @@ export default function ApiList() {
 
       <Card className="glass-panel" sx={{ mb: 4 }}>
         <CardContent sx={{ display: 'flex', gap: 3, flexWrap: 'wrap' }}>
-          <TextField select label="Org Level 3" value={filterLevel3} onChange={e => { setFilterLevel3(e.target.value); setFilterLevel4(''); setFilterLevel5(''); }} sx={{ minWidth: 200 }} size="small" variant="filled">
+          <TextField select label="Org Level 3" value={filterLevel3} onChange={e => { setFilterLevel3(e.target.value); setFilterLevel4(''); setFilterLevel5(''); setPage(0); }} sx={{ minWidth: 200 }} size="small" variant="filled">
             <MenuItem value=""><em>All</em></MenuItem>
             {level3Options.map(opt => <MenuItem key={opt} value={opt}>{opt}</MenuItem>)}
           </TextField>
-          <TextField select label="Org Level 4" value={filterLevel4} onChange={e => { setFilterLevel4(e.target.value); setFilterLevel5(''); }} sx={{ minWidth: 200 }} size="small" variant="filled" disabled={!filterLevel3}>
+          <TextField select label="Org Level 4" value={filterLevel4} onChange={e => { setFilterLevel4(e.target.value); setFilterLevel5(''); setPage(0); }} sx={{ minWidth: 200 }} size="small" variant="filled" disabled={!filterLevel3}>
             <MenuItem value=""><em>All</em></MenuItem>
             {level4Options.map(opt => <MenuItem key={opt} value={opt}>{opt}</MenuItem>)}
           </TextField>
-          <TextField select label="Org Level 5" value={filterLevel5} onChange={e => setFilterLevel5(e.target.value)} sx={{ minWidth: 200 }} size="small" variant="filled" disabled={!filterLevel4}>
+          <TextField select label="Org Level 5" value={filterLevel5} onChange={e => { setFilterLevel5(e.target.value); setPage(0); }} sx={{ minWidth: 200 }} size="small" variant="filled" disabled={!filterLevel4}>
             <MenuItem value=""><em>All</em></MenuItem>
             {level5Options.map(opt => <MenuItem key={opt} value={opt}>{opt}</MenuItem>)}
           </TextField>
@@ -124,13 +155,13 @@ export default function ApiList() {
                 </Box>
                 <Menu anchorEl={anchorEl} open={Boolean(anchorEl)} onClose={handleStatusFilterClose} anchorOrigin={{ vertical: 'bottom', horizontal: 'right' }} transformOrigin={{ vertical: 'top', horizontal: 'right' }}>
                   {Object.entries(statusConfig).map(([key, config]) => (
-                    <MenuItem key={key} onClick={() => toggleStatusFilter(key)} dense>
+                    <MenuItem key={key} onClick={() => { toggleStatusFilter(key); setPage(0); }} dense>
                       <Checkbox checked={filterStatus.includes(key)} size="small" />
                       <ListItemText primary={config.label} />
                     </MenuItem>
                   ))}
                   <Divider />
-                  <MenuItem onClick={() => setFilterStatus([])} sx={{ justifyContent: 'center' }} disabled={filterStatus.length === 0}>
+                  <MenuItem onClick={() => { setFilterStatus([]); setPage(0); }} sx={{ justifyContent: 'center' }} disabled={filterStatus.length === 0}>
                     <Typography color="secondary" variant="body2">Clear Filter</Typography>
                   </MenuItem>
                 </Menu>
@@ -138,7 +169,7 @@ export default function ApiList() {
             </TableRow>
           </TableHead>
           <TableBody>
-            {filteredApis.map((api) => {
+            {paginatedApis.map((api) => {
               const statusInfo = statusConfig[api.scanStatus as keyof typeof statusConfig];
               return (
                 <TableRow key={api.id} sx={{ '&:last-child td, &:last-child th': { border: 0 }, '&:hover': { backgroundColor: 'rgba(0,0,0,0.03)' } }}>
@@ -201,13 +232,23 @@ export default function ApiList() {
             })}
             {filteredApis.length === 0 && (
               <TableRow>
-                <TableCell colSpan={5} align="center" sx={{ py: 6 }}>
+                <TableCell colSpan={6} align="center" sx={{ py: 6 }}>
                   <Typography color="text.secondary">No APIs found matching the current filters.</Typography>
                 </TableCell>
               </TableRow>
             )}
           </TableBody>
         </Table>
+        <TablePagination
+          rowsPerPageOptions={[10, 25, 50, 100]}
+          component="div"
+          count={filteredApis.length}
+          rowsPerPage={rowsPerPage}
+          page={page}
+          onPageChange={handleChangePage}
+          onRowsPerPageChange={handleChangeRowsPerPage}
+          sx={{ borderTop: '1px solid rgba(0,0,0,0.1)' }}
+        />
       </TableContainer>
     </Box>
   );

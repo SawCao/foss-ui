@@ -1,26 +1,39 @@
 import { create } from 'zustand';
-import { type ApiItem, type Snapshot, mockApis, mockSnapshots, mockFixSummaries, mockGraphData } from '../mock/data';
+import { type ApiItem, type Snapshot, type AgentFixSummary, type GraphLink, type GraphNode, initializeMockData } from '../mock/data';
 
 interface AppState {
   // Data
   apis: ApiItem[];
   snapshots: Snapshot[];
-  fixSummaries: typeof mockFixSummaries;
-  graphData: typeof mockGraphData;
+  fixSummaries: AgentFixSummary[];
+  graphData: { nodes: GraphNode[]; links: GraphLink[] };
+  isLoading: boolean;
   
   // Actions
-  // (In a real app, these would be fetch calls)
-  loadLatestData: () => void;
+  loadLatestData: () => Promise<void>;
 }
 
 export const useStore = create<AppState>((set) => ({
-  apis: mockApis,
-  snapshots: mockSnapshots,
-  fixSummaries: mockFixSummaries,
-  graphData: mockGraphData,
+  apis: [],
+  snapshots: [],
+  fixSummaries: [],
+  graphData: { nodes: [], links: [] },
+  isLoading: true,
   
-  loadLatestData: () => {
-    // simulate loading
-    set({ apis: mockApis });
+  loadLatestData: async () => {
+    set({ isLoading: true });
+    try {
+      const data = await initializeMockData();
+      set({ 
+        apis: data.apis, 
+        snapshots: data.snapshots, 
+        fixSummaries: data.fixSummaries, 
+        graphData: data.graphData,
+        isLoading: false 
+      });
+    } catch (error) {
+      console.error('Failed to load mock data:', error);
+      set({ isLoading: false });
+    }
   }
 }));
