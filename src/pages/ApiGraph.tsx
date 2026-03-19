@@ -27,6 +27,16 @@ const LARGE_GRAPH_LINK_THRESHOLD = 320;
 const VERY_LARGE_GRAPH_NODE_THRESHOLD = 320;
 const VERY_LARGE_GRAPH_LINK_THRESHOLD = 700;
 const UNCLUSTERED_GROUP_ID = 'Unclustered';
+const AUTO_CLUSTER_OVERVIEW_PADDING = 140;
+const AUTO_CLUSTER_OVERVIEW_MAX_ZOOM = 0.95;
+const AUTO_CLUSTER_CACHE_STORAGE_KEY = 'api-topology:auto-cluster-cache:v1';
+
+type AutoClusterCachePayload = {
+  signature: string;
+  communities: Record<string, number>;
+};
+
+let inMemoryAutoClusterCache: AutoClusterCachePayload | null = null;
 
 type DisplayNode = {
   id: string;
@@ -94,6 +104,76 @@ const getAutoClusterGroupId = (
   }
 
   return `AI-Cluster-${communities[nodeId] || 0}`;
+};
+
+const updateFnv1a = (hash: number, text: string) => {
+  let next = hash;
+  for (let i = 0; i < text.length; i += 1) {
+    next ^= text.charCodeAt(i);
+    next = Math.imul(next, 16777619);
+  }
+  return next >>> 0;
+};
+
+const buildAutoClusterSignature = (
+  apiNodeIds: string[],
+  edges: Array<{ source: string; target: string; weight: number }>
+) => {
+  let hash = 2166136261;
+
+  hash = updateFnv1a(hash, `n:${apiNodeIds.length}|e:${edges.length}|`);
+
+  apiNodeIds.forEach(nodeId => {
+    hash = updateFnv1a(hash, nodeId);
+    hash = updateFnv1a(hash, '|');
+  });
+
+  edges.forEach(edge => {
+    hash = updateFnv1a(hash, edge.source);
+    hash = updateFnv1a(hash, '>');
+    hash = updateFnv1a(hash, edge.target);
+    hash = updateFnv1a(hash, ':');
+    hash = updateFnv1a(hash, String(Math.max(1, edge.weight || 1)));
+    hash = updateFnv1a(hash, '|');
+  });
+
+  return `v1-${apiNodeIds.length}-${edges.length}-${hash.toString(16)}`;
+};
+
+const readAutoClusterCache = () => {
+  if (inMemoryAutoClusterCache) return inMemoryAutoClusterCache;
+  if (typeof window === 'undefined') return null;
+
+  try {
+    const raw = window.localStorage.getItem(AUTO_CLUSTER_CACHE_STORAGE_KEY);
+    if (!raw) return null;
+
+    const parsed = JSON.parse(raw) as AutoClusterCachePayload;
+    if (
+      !parsed
+      || typeof parsed.signature !== 'string'
+      || typeof parsed.communities !== 'object'
+      || parsed.communities === null
+    ) {
+      return null;
+    }
+
+    inMemoryAutoClusterCache = parsed;
+    return parsed;
+  } catch {
+    return null;
+  }
+};
+
+const writeAutoClusterCache = (payload: AutoClusterCachePayload) => {
+  inMemoryAutoClusterCache = payload;
+  if (typeof window === 'undefined') return;
+
+  try {
+    window.localStorage.setItem(AUTO_CLUSTER_CACHE_STORAGE_KEY, JSON.stringify(payload));
+  } catch {
+    // Ignore storage quota/private-mode errors and keep runtime behavior unchanged.
+  }
 };
 
 const buildExpandedClusterLayout = (nodes: DisplayNode[]): ExpandedClusterLayout | null => {
@@ -227,7 +307,7 @@ export default function ApiGraph() {
   const nodePositionsRef = useRef<Map<string, { x: number; y: number }>>(new Map());
   const clusterAnchorsRef = useRef<Map<string, ClusterAnchor>>(new Map());
   const [dimensions, setDimensions] = useState({ width: 800, height: 600 });
-  const [groupBy, setGroupBy] = useState<'none' | 'autoCluster' | 'level4' | 'level5'>('none');
+  const [groupBy, setGroupBy] = useState<'none' | 'autoCluster' | 'level4' | 'level5'>('autoCluster');
   const [selectedNode, setSelectedNode] = useState<any>(null);
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
   const [focusedAutoClusterId, setFocusedAutoClusterId] = useState<string | null>(null);
@@ -314,7 +394,25 @@ export default function ApiGraph() {
       }
     });
 
-    const communities = detectCommunities(apiNodes, edgesData);
+    const signature = buildAutoClusterSignature(apiNodes, edgesData);
+    const cached = readAutoClusterCache();
+    let communities: Record<string, number> | null = null;
+
+    if (cached && cached.signature === signature) {
+      const hasAllApiNodeAssignments = apiNodes.every(nodeId => typeof cached.communities[nodeId] === 'number');
+      if (hasAllApiNodeAssignments) {
+        communities = cached.communities;
+      }
+    }
+
+    if (!communities) {
+      communities = detectCommunities(apiNodes, edgesData);
+      writeAutoClusterCache({
+        signature,
+        communities
+      });
+    }
+
     const clusterApiIds = new Map<string, string[]>();
     const clusterMemberIds = new Map<string, string[]>();
 
@@ -655,11 +753,36 @@ export default function ApiGraph() {
   useEffect(() => {
     if (!fgRef.current || displayGraphData.nodes.length === 0) return;
 
-    const zoomTimer = window.setTimeout(() => {
-      fgRef.current?.zoomToFit(800, 80);
-    }, 120);
+    const isAutoClusterOverview = groupBy === 'autoCluster' && !focusedAutoClusterId;
+    const fitPadding = isAutoClusterOverview ? AUTO_CLUSTER_OVERVIEW_PADDING : 80;
+    const clampOverviewZoom = (duration: number) => {
+      if (!isAutoClusterOverview || !fgRef.current) return;
+      const currentZoom = fgRef.current.zoom?.();
+      if (
+        typeof currentZoom === 'number'
+        && Number.isFinite(currentZoom)
+        && currentZoom > AUTO_CLUSTER_OVERVIEW_MAX_ZOOM
+      ) {
+        fgRef.current.zoom(
+          AUTO_CLUSTER_OVERVIEW_MAX_ZOOM,
+          Math.max(180, Math.min(420, duration))
+        );
+      }
+    };
 
-    return () => window.clearTimeout(zoomTimer);
+    const runFit = (duration: number) => {
+      if (!fgRef.current) return;
+      fgRef.current.zoomToFit(duration, fitPadding);
+      clampOverviewZoom(duration);
+    };
+
+    const zoomTimer = window.setTimeout(() => runFit(800), 120);
+    const settleZoomTimer = window.setTimeout(() => runFit(420), 780);
+
+    return () => {
+      window.clearTimeout(zoomTimer);
+      window.clearTimeout(settleZoomTimer);
+    };
   }, [groupBy, focusedAutoClusterId, displayGraphData.nodes.length]);
 
   useEffect(() => {
