@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <!-- HSBC Red background square -->
+  <rect width="64" height="64" fill="#DB0011"/>
+  <!-- HSBC Hexagon/diamond pattern: four triangles forming the classic HSBC logo -->
+  <!-- Top triangle (white) -->
+  <polygon points="32,4 60,32 32,32" fill="#ffffff"/>
+  <!-- Left triangle (red, slightly darker for contrast) -->
+  <polygon points="4,4 32,4 32,32" fill="#DB0011"/>
+  <!-- Bottom triangle (white) -->
+  <polygon points="4,32 32,32 4,60" fill="#ffffff"/>
+  <!-- Right triangle (red) -->
+  <polygon points="32,32 60,32 32,60" fill="#DB0011"/>
+  <!-- Inner white square to create the classic HSBC hexagon mark -->
+</svg>

@@ -1,0 +1,11 @@
+api,inboundDependencyCount,inboundDependents,outboundDependencyCount,outboundDependencies
+Service Auth,4,Service Payment;Service UserProfile;Service Order;Service FraudDetection,1,Service Notification
+Service Payment,2,Service Order;Service Recommendation,3,Service Auth;Service UserProfile;Service Notification
+Service Catalog,1,Service Search,1,Service Inventory
+Service UserProfile,2,Service Payment;Service Recommendation,2,Service Auth;Service Notification
+Service Notification,4,Service Auth;Service Payment;Service UserProfile;Service Order,0,
+Service Recommendation,0,,1,Service UserProfile
+Service Order,0,,2,Service Auth;Service Payment
+Service Inventory,1,Service Catalog,0,
+Service Search,0,,1,Service Catalog
+Service FraudDetection,0,,1,Service Auth
