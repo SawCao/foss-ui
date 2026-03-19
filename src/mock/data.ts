@@ -4,6 +4,42 @@ import Papa from 'papaparse';
 const scanFilesGlob = import.meta.glob('./api_scan_*.csv', { query: '?raw', import: 'default', eager: false });
 const apiFlowGlob = import.meta.glob('./api_flow.csv', { query: '?raw', import: 'default', eager: false });
 
+type MockFilesMap = Record<string, string>;
+
+declare global {
+  interface Window {
+    MOCK_FILES?: MockFilesMap;
+  }
+}
+
+function getWindowMockFiles(): MockFilesMap {
+  if (typeof window === 'undefined' || !window.MOCK_FILES) {
+    return {};
+  }
+
+  return Object.entries(window.MOCK_FILES).reduce<MockFilesMap>((acc, [name, content]) => {
+    if (typeof content === 'string') {
+      acc[name] = content;
+    }
+    return acc;
+  }, {});
+}
+
+function pickFlowMockFile(mockFiles: MockFilesMap): string | undefined {
+  const preferredNames = ['api_flow.csv', 'api_flow_20k.csv', 'api_flow_l.csv'];
+  for (const fileName of preferredNames) {
+    if (mockFiles[fileName]) {
+      return mockFiles[fileName];
+    }
+  }
+
+  const dynamicFlowName = Object.keys(mockFiles)
+    .sort((a, b) => a.localeCompare(b))
+    .find((fileName) => /^api_flow.*\.csv$/i.test(fileName));
+
+  return dynamicFlowName ? mockFiles[dynamicFlowName] : undefined;
+}
+
 export type ScanStatus = 'success' | 'failed' | 'in_progress' | 'waiting';
 export type ApiAction = 'A' | 'B' | 'C';
 
@@ -110,20 +146,38 @@ export let mockGraphData = { nodes: [] as GraphNode[], links: [] as GraphLink[] 
  * Main initialization function to load and parse all data asynchronously
  */
 export async function initializeMockData() {
+  const windowMockFiles = getWindowMockFiles();
+
   // 1. Load Flow Data
-  const flowKeys = Object.keys(apiFlowGlob);
   let parsedFlowData: Record<string, string>[] = [];
-  if (flowKeys.length > 0) {
-    const apiFlowCsvRaw = await (apiFlowGlob[flowKeys[0]]() as Promise<string>);
-    parsedFlowData = await parseCSVAsync(apiFlowCsvRaw);
+  const flowCsvFromWindow = pickFlowMockFile(windowMockFiles);
+  if (flowCsvFromWindow) {
+    parsedFlowData = await parseCSVAsync(flowCsvFromWindow);
+  } else {
+    const flowKeys = Object.keys(apiFlowGlob);
+    if (flowKeys.length > 0) {
+      const apiFlowCsvRaw = await (apiFlowGlob[flowKeys[0]]() as Promise<string>);
+      parsedFlowData = await parseCSVAsync(apiFlowCsvRaw);
+    }
   }
 
   // 2. Load and Parse Scan Files
   mockSnapshots = [];
-  const scanEntries = Object.entries(scanFilesGlob);
+  const scanEntries = Object.keys(windowMockFiles)
+    .filter((fileName) => /^api_scan_.*\.csv$/i.test(fileName))
+    .sort((a, b) => a.localeCompare(b))
+    .map((fileName) => ({
+      path: `./${fileName}`,
+      load: async () => windowMockFiles[fileName]
+    }));
+  const scanEntriesFromGlob = Object.entries(scanFilesGlob).map(([path, importFn]) => ({
+    path,
+    load: () => importFn() as Promise<string>
+  }));
+  const activeScanEntries = scanEntries.length > 0 ? scanEntries : scanEntriesFromGlob;
   
-  for (const [path, importFn] of scanEntries) {
-    const match = path.match(/api_scan_(.*?)\.csv/);
+  for (const { path, load } of activeScanEntries) {
+    const match = path.match(/api_scan_(.*?)\.csv/i);
     const dateStr = match ? match[1] : 'unknown';
     
     let formattedDate = dateStr;
@@ -131,7 +185,7 @@ export async function initializeMockData() {
       formattedDate = `${dateStr.slice(0, 4)}-${dateStr.slice(4, 6)}-${dateStr.slice(6, 8)}`;
     }
 
-    const content = await (importFn() as Promise<string>);
+    const content = await load();
     const parsedData = await parseCSVAsync(content);
     
     const apiItems: ApiItem[] = parsedData
