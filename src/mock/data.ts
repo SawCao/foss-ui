@@ -178,14 +178,27 @@ export async function initializeMockData() {
     const sourceName = row['api'];
     let targets: string[] = [];
     try {
-      const depsVal = row['outboundDependencies'] || '[]';
-      // Handle cases where CSV double quotes inner quotes: ["api1","api2"] -> ["api1","api2"]
-      // PapaParse usually handles the outer quotes, but we might need to be careful with inner representation
-      targets = JSON.parse(depsVal);
-      if (!Array.isArray(targets)) targets = [];
+      const depsVal = (row['outboundDependencies'] || '[]').trim();
+      if (depsVal.startsWith('[') && depsVal.endsWith(']')) {
+        const content = depsVal.slice(1, -1).trim();
+        if (content === '') {
+          targets = [];
+        } else {
+          // Attempt JSON parse first for backwards compatibility
+          try {
+            const parsed = JSON.parse(depsVal);
+            targets = Array.isArray(parsed) ? parsed : [];
+          } catch (e) {
+            // Fallback for the new [api1,api2] format (not valid JSON if unquoted)
+            targets = content.split(',').map((s: string) => s.trim()).filter(Boolean);
+          }
+        }
+      } else {
+        // Fallback for old Format or semicolon-separated
+        targets = depsVal.split(';').map((s: string) => s.trim()).filter(Boolean);
+      }
     } catch (e) {
-      // Fallback for old Format or malformed JSON
-      targets = (row['outboundDependencies'] || '').split(';').map((s: string) => s.trim()).filter(Boolean);
+      targets = [];
     }
     
     if (sourceName && targets.length > 0) {

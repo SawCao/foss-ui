@@ -1,5 +1,5 @@
 import { useState, useMemo, useEffect } from 'react';
-import { Box, Typography, Card, CardContent, Table, TableBody, TableCell, TableContainer, TableHead, TableRow, Chip, TextField, MenuItem, Tabs, Tab, TableSortLabel, CircularProgress } from '@mui/material';
+import { Box, Typography, Card, CardContent, Table, TableBody, TableCell, TableContainer, TableHead, TableRow, Chip, TextField, MenuItem, Tabs, Tab, TableSortLabel, CircularProgress, TablePagination } from '@mui/material';
 import { useStore } from '../store/useStore';
 import TrendingUpIcon from '@mui/icons-material/TrendingUp';
 import TrendingDownIcon from '@mui/icons-material/TrendingDown';
@@ -40,6 +40,9 @@ export default function WeeklyComparison() {
   
   const [sortField, setSortField] = useState<SortField>(null);
   const [sortOrder, setSortOrder] = useState<SortOrder>('desc');
+
+  const [page, setPage] = useState(0);
+  const [rowsPerPage, setRowsPerPage] = useState(25);
 
   const sortedSnapshots = useMemo(() => {
     return [...snapshots].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
@@ -157,10 +160,24 @@ export default function WeeklyComparison() {
     });
   }, [displayData, sortField, sortOrder, groupBy]);
 
+  const paginatedData = useMemo(() => {
+    return sortedData.slice(page * rowsPerPage, page * rowsPerPage + rowsPerPage);
+  }, [sortedData, page, rowsPerPage]);
+
   const handleSort = (field: SortField) => {
     const isAsc = sortField === field && sortOrder === 'asc';
     setSortOrder(isAsc ? 'desc' : 'asc');
     setSortField(field);
+    setPage(0);
+  };
+
+  const handleChangePage = (_: unknown, newPage: number) => {
+    setPage(newPage);
+  };
+
+  const handleChangeRowsPerPage = (event: React.ChangeEvent<HTMLInputElement>) => {
+    setRowsPerPage(parseInt(event.target.value, 10));
+    setPage(0);
   };
 
   const summary = useMemo(() => {
@@ -254,7 +271,7 @@ export default function WeeklyComparison() {
       <Card className="glass-panel" sx={{ mb: 4 }}>
         <CardContent>
           <Box sx={{ mb: 3, borderBottom: 1, borderColor: 'divider' }}>
-            <Tabs value={groupBy} onChange={(_, val) => { setGroupBy(val); setSortField(null); }} textColor="primary" indicatorColor="primary">
+            <Tabs value={groupBy} onChange={(_, val) => { setGroupBy(val); setSortField(null); setPage(0); }} textColor="primary" indicatorColor="primary">
               <Tab label="Individual APIs (No Grouping)" value="none" />
               <Tab label="Group By Level 3" value="level3" />
               <Tab label="Group By Level 4" value="level4" />
@@ -262,15 +279,15 @@ export default function WeeklyComparison() {
             </Tabs>
           </Box>
           <Box sx={{ display: 'flex', gap: 3, flexWrap: 'wrap' }}>
-            <TextField select label="Filter Level 3" value={filterLevel3} onChange={e => { setFilterLevel3(e.target.value); setFilterLevel4(''); setFilterLevel5(''); }} sx={{ minWidth: 200 }} size="small" variant="outlined">
+            <TextField select label="Filter Level 3" value={filterLevel3} onChange={e => { setFilterLevel3(e.target.value); setFilterLevel4(''); setFilterLevel5(''); setPage(0); }} sx={{ minWidth: 200 }} size="small" variant="outlined">
               <MenuItem value=""><em>All</em></MenuItem>
               {level3Options.map(opt => <MenuItem key={opt} value={opt}>{opt}</MenuItem>)}
             </TextField>
-            <TextField select label="Filter Level 4" value={filterLevel4} onChange={e => { setFilterLevel4(e.target.value); setFilterLevel5(''); }} sx={{ minWidth: 200 }} size="small" variant="outlined" disabled={!filterLevel3}>
+            <TextField select label="Filter Level 4" value={filterLevel4} onChange={e => { setFilterLevel4(e.target.value); setFilterLevel5(''); setPage(0); }} sx={{ minWidth: 200 }} size="small" variant="outlined" disabled={!filterLevel3}>
               <MenuItem value=""><em>All</em></MenuItem>
               {level4Options.map(opt => <MenuItem key={opt} value={opt}>{opt}</MenuItem>)}
             </TextField>
-            <TextField select label="Filter Level 5" value={filterLevel5} onChange={e => setFilterLevel5(e.target.value)} sx={{ minWidth: 200 }} size="small" variant="outlined" disabled={!filterLevel4}>
+            <TextField select label="Filter Level 5" value={filterLevel5} onChange={e => { setFilterLevel5(e.target.value); setPage(0); }} sx={{ minWidth: 200 }} size="small" variant="outlined" disabled={!filterLevel4}>
               <MenuItem value=""><em>All</em></MenuItem>
               {level5Options.map(opt => <MenuItem key={opt} value={opt}>{opt}</MenuItem>)}
             </TextField>
@@ -313,7 +330,7 @@ export default function WeeklyComparison() {
             </TableRow>
           </TableHead>
           <TableBody>
-            {sortedData.map((row: any) => {
+            {paginatedData.map((row: any) => {
               if (row.type === 'api') {
                 return (
                   <TableRow key={row.id} sx={{ '&:last-child td, &:last-child th': { border: 0 }, '&:hover': { backgroundColor: 'rgba(0,0,0,0.02)' } }}>
@@ -406,6 +423,16 @@ export default function WeeklyComparison() {
             )}
           </TableBody>
         </Table>
+        <TablePagination
+          rowsPerPageOptions={[10, 25, 50, 100]}
+          component="div"
+          count={sortedData.length}
+          rowsPerPage={rowsPerPage}
+          page={page}
+          onPageChange={handleChangePage}
+          onRowsPerPageChange={handleChangeRowsPerPage}
+          sx={{ borderTop: '1px solid rgba(0,0,0,0.1)' }}
+        />
       </TableContainer>
     </Box>
   );
