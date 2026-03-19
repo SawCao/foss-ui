@@ -60,7 +60,7 @@ async function parseCSVAsync(csvString: string): Promise<Record<string, string>[
     Papa.parse(csvString, {
       header: true,
       skipEmptyLines: true,
-      worker: true, // Use Web Worker
+      worker: false, // Disabling worker for offline compatibility (file:// protocol issues)
       complete: (results) => {
         resolve(results.data as Record<string, string>[]);
       },
@@ -72,6 +72,7 @@ async function parseCSVAsync(csvString: string): Promise<Record<string, string>[
 }
 
 export function mapCsvRowToApiItem(row: Record<string, any>): ApiItem {
+  if (!row) return {} as ApiItem; // Safety guard for malformed/empty rows
   const issueCount = parseInt(row['critical_count'] || '0', 10);
   
   let scanStatus: ScanStatus = 'success';
@@ -135,12 +136,14 @@ export async function initializeMockData() {
     const content = await (importFn() as Promise<string>);
     const parsedData = await parseCSVAsync(content);
     
-    const apiItems: ApiItem[] = parsedData.map(row => {
-      const item = mapCsvRowToApiItem(row);
-      const actionIndex = (item.name || '').length % 3;
-      item.action = ['A', 'B', 'C'][actionIndex] as ApiAction;
-      return item;
-    });
+    const apiItems: ApiItem[] = parsedData
+      .filter(row => row && (row['API name'] || row['PI name'] || row['EIM No'])) // Filter out junk rows
+      .map(row => {
+        const item = mapCsvRowToApiItem(row);
+        const actionIndex = (item.name || '').length % 3;
+        item.action = ['A', 'B', 'C'][actionIndex] as ApiAction;
+        return item;
+      });
 
     mockSnapshots.push({
       id: `snap-${dateStr}`,

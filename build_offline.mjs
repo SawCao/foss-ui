@@ -8,31 +8,33 @@ const htmlFile = 'index.html';
 const origData = fs.readFileSync(dataFile, 'utf-8');
 const origHtml = fs.readFileSync(htmlFile, 'utf-8');
 
-const targetStr = `import apiFlowCsvRaw from './api_flow.csv?raw';
+const targetStr = `// We don't use ?raw here anymore so we can fetch them or import them dynamically
+const scanFilesGlob = import.meta.glob('./api_scan_*.csv', { query: '?raw', import: 'default', eager: false });
+const apiFlowGlob = import.meta.glob('./api_flow.csv', { query: '?raw', import: 'default', eager: false });`;
 
-// Eagerly import all api_scan_*.csv files as raw strings
-const scanFiles = import.meta.glob('./api_scan_*.csv', { query: '?raw', import: 'default', eager: true }) as Record<string, string>;`;
-
-const replacementStr = `let apiFlowCsvRaw: string = '';
-let scanFiles: Record<string, string> = {};
+const replacementStr = `let scanFilesGlob: Record<string, any> = {};
+let apiFlowGlob: Record<string, any> = {};
 
 if (typeof window !== 'undefined' && 'MOCK_FILES' in window) {
   const MOCK = (window as any).MOCK_FILES;
-  // Values are JSON-encoded strings (produced by PowerShell ConvertTo-Json), so we parse them.
   const decode = (v: any) => (typeof v === 'string' && v.startsWith('"')) ? JSON.parse(v) : String(v ?? '');
-  apiFlowCsvRaw = decode(MOCK['api_flow.csv']);
-  scanFiles = Object.fromEntries(
-    Object.entries(MOCK)
-      .filter(([k]) => k.startsWith('api_scan_') && k.endsWith('.csv'))
-      .map(([k, v]) => [k, decode(v)])
-  ) as Record<string, string>;
+  
+  const apiFlowCsvRaw = decode(MOCK['api_flow.csv']);
+  apiFlowGlob = { './api_flow.csv': () => Promise.resolve(apiFlowCsvRaw) };
+  
+  const scanFiles: Record<string, any> = {};
+  Object.entries(MOCK)
+    .filter(([k]) => k.startsWith('api_scan_') && k.endsWith('.csv'))
+    .forEach(([k, v]) => {
+      scanFiles['./' + k] = () => Promise.resolve(decode(v));
+    });
+  scanFilesGlob = scanFiles;
 } else {
   // @ts-ignore
-  apiFlowCsvRaw = import.meta.glob('./api_flow.csv', { query: '?raw', import: 'default', eager: true })['./api_flow.csv'] as string;
+  scanFilesGlob = import.meta.glob('./api_scan_*.csv', { query: '?raw', import: 'default', eager: false });
   // @ts-ignore
-  scanFiles = import.meta.glob('./api_scan_*.csv', { query: '?raw', import: 'default', eager: true }) as Record<string, string>;
-}
-`;
+  apiFlowGlob = import.meta.glob('./api_flow.csv', { query: '?raw', import: 'default', eager: false });
+}`;
 
 try {
   // Only patch data.ts before build
