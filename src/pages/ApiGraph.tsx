@@ -15,11 +15,189 @@ import AddCircleOutlineIcon from '@mui/icons-material/AddCircleOutline';
 import { detectCommunities } from '../utils/louvain';
 import { forceCollide, forceRadial } from 'd3-force';
 
+const GLOBAL_COLLISION_PADDING = 14;
+const EXPANDED_CLUSTER_PADDING = 28;
+const EXPANDED_CLUSTER_EXCLUSION_PADDING = 34;
+const EXPANDED_CLUSTER_PULL_STRENGTH = 0.22;
+const EXPANDED_CLUSTER_BOUNDARY_STRENGTH = 0.35;
+const EXPANDED_CLUSTER_EXCLUSION_STRENGTH = 0.42;
+const LARGE_GRAPH_NODE_THRESHOLD = 180;
+const LARGE_GRAPH_LINK_THRESHOLD = 320;
+const VERY_LARGE_GRAPH_NODE_THRESHOLD = 320;
+const VERY_LARGE_GRAPH_LINK_THRESHOLD = 700;
+
+type DisplayNode = {
+  id: string;
+  name: string;
+  hasIssues: boolean;
+  size: number;
+  val: number;
+  degree?: number;
+  connectionCount?: number;
+  apisInside?: string[];
+  originalGroupId?: string;
+  originalGroupName?: string;
+  isClusterNode?: boolean;
+  isExpandedMember?: boolean;
+  x?: number;
+  y?: number;
+  vx?: number;
+  vy?: number;
+};
+
+type ClusterAnchor = {
+  x: number;
+  y: number;
+};
+
+type ExpandedClusterLayout = {
+  groupId: string;
+  memberIds: Set<string>;
+  slots: Map<string, { x: number; y: number }>;
+  radius: number;
+};
+
+const getNodeRadius = (node: Partial<DisplayNode> | null | undefined) => Math.max(6, node?.val || 6);
+
+const getOrbitRadius = (node: Partial<DisplayNode>, maxDegree: number) => {
+  const invertedScore = 1 - ((node.degree || 0) / maxDegree);
+
+  if (invertedScore < 0.15) return 0;
+  if (invertedScore < 0.4) return 90;
+  if (invertedScore < 0.7) return 190;
+  return 300;
+};
+
+const buildExpandedClusterLayout = (nodes: DisplayNode[]): ExpandedClusterLayout | null => {
+  if (nodes.length === 0) return null;
+
+  const orderedNodes = [...nodes].sort((a, b) => {
+    const degreeDiff = (b.degree || 0) - (a.degree || 0);
+    if (degreeDiff !== 0) return degreeDiff;
+    return String(a.id).localeCompare(String(b.id));
+  });
+
+  const maxNodeRadius = orderedNodes.reduce((max, node) => Math.max(max, getNodeRadius(node)), 0);
+  const slotGap = Math.max(44, maxNodeRadius * 2 + 14);
+  const slots = new Map<string, { x: number; y: number }>();
+
+  let cursor = 0;
+  let ringIndex = 0;
+  let furthestExtent = 0;
+
+  while (cursor < orderedNodes.length) {
+    const ringRadius = ringIndex === 0 ? 0 : ringIndex * slotGap;
+    const capacity = ringIndex === 0
+      ? 1
+      : Math.max(6, Math.floor((2 * Math.PI * ringRadius) / slotGap));
+
+    for (let i = 0; i < capacity && cursor < orderedNodes.length; i += 1) {
+      const node = orderedNodes[cursor];
+      const angle = ringIndex === 0
+        ? 0
+        : ((i / capacity) * Math.PI * 2) + (ringIndex % 2 ? Math.PI / capacity : 0);
+
+      const x = Math.cos(angle) * ringRadius;
+      const y = Math.sin(angle) * ringRadius;
+
+      slots.set(node.id, { x, y });
+      furthestExtent = Math.max(furthestExtent, ringRadius + getNodeRadius(node));
+      cursor += 1;
+    }
+
+    ringIndex += 1;
+  }
+
+  return {
+    groupId: String(nodes[0].originalGroupId),
+    memberIds: new Set(nodes.map(node => node.id)),
+    slots,
+    radius: Math.max(96, furthestExtent + EXPANDED_CLUSTER_PADDING)
+  };
+};
+
+const createExpandedClusterForce = (
+  layouts: ExpandedClusterLayout[],
+  clusterAnchorsRef: { current: Map<string, ClusterAnchor> }
+) => {
+  let nodes: DisplayNode[] = [];
+
+  const force = (alpha: number) => {
+    if (layouts.length === 0) return;
+
+    const resolvedLayouts = layouts
+      .map(layout => {
+        const anchor = clusterAnchorsRef.current.get(layout.groupId);
+        return anchor ? { ...layout, anchor } : null;
+      })
+      .filter(Boolean) as Array<ExpandedClusterLayout & { anchor: ClusterAnchor }>;
+
+    if (resolvedLayouts.length === 0) return;
+
+    const nodesById = new Map(nodes.map(node => [String(node.id), node]));
+
+    resolvedLayouts.forEach(layout => {
+      layout.memberIds.forEach(memberId => {
+        const node = nodesById.get(memberId);
+        const slot = layout.slots.get(memberId);
+
+        if (!node || !slot) return;
+
+        const targetX = layout.anchor.x + slot.x;
+        const targetY = layout.anchor.y + slot.y;
+        const nodeX = node.x ?? layout.anchor.x;
+        const nodeY = node.y ?? layout.anchor.y;
+
+        node.vx = (node.vx || 0) + (targetX - nodeX) * EXPANDED_CLUSTER_PULL_STRENGTH * alpha;
+        node.vy = (node.vy || 0) + (targetY - nodeY) * EXPANDED_CLUSTER_PULL_STRENGTH * alpha;
+
+        const dx = nodeX - layout.anchor.x;
+        const dy = nodeY - layout.anchor.y;
+        const distance = Math.hypot(dx, dy) || 0.0001;
+        const maxDistance = Math.max(18, layout.radius - getNodeRadius(node) - 8);
+
+        if (distance > maxDistance) {
+          const correction = (distance - maxDistance) * EXPANDED_CLUSTER_BOUNDARY_STRENGTH * alpha;
+          node.vx -= (dx / distance) * correction;
+          node.vy -= (dy / distance) * correction;
+        }
+      });
+    });
+
+    nodes.forEach(node => {
+      resolvedLayouts.forEach(layout => {
+        if (node.isExpandedMember && node.originalGroupId === layout.groupId) return;
+
+        const nodeX = node.x ?? layout.anchor.x;
+        const nodeY = node.y ?? layout.anchor.y;
+        const dx = nodeX - layout.anchor.x;
+        const dy = nodeY - layout.anchor.y;
+        const distance = Math.hypot(dx, dy) || 0.0001;
+        const minDistance = layout.radius + getNodeRadius(node) + EXPANDED_CLUSTER_EXCLUSION_PADDING;
+
+        if (distance < minDistance) {
+          const correction = (minDistance - distance) * EXPANDED_CLUSTER_EXCLUSION_STRENGTH * alpha;
+          node.vx = (node.vx || 0) + (dx / distance) * correction;
+          node.vy = (node.vy || 0) + (dy / distance) * correction;
+        }
+      });
+    });
+  };
+
+  force.initialize = (incomingNodes: DisplayNode[]) => {
+    nodes = incomingNodes || [];
+  };
+
+  return force;
+};
+
 export default function ApiGraph() {
   const { graphData, apis, isLoading } = useStore();
   const navigate = useNavigate();
   const containerRef = useRef<HTMLDivElement>(null);
   const fgRef = useRef<any>(null);
+  const nodePositionsRef = useRef<Map<string, { x: number; y: number }>>(new Map());
+  const clusterAnchorsRef = useRef<Map<string, ClusterAnchor>>(new Map());
   const [dimensions, setDimensions] = useState({ width: 800, height: 600 });
   const [groupBy, setGroupBy] = useState<'none' | 'autoCluster' | 'level4' | 'level5'>('none');
   const [selectedNode, setSelectedNode] = useState<any>(null);
@@ -94,9 +272,11 @@ export default function ApiGraph() {
         targetGroupId = `Infrastructure: ${node.name}`;
         targetGroupName = node.name;
       }
+
+      const isExpandedMember = groupBy !== 'none' && expandedGroups.has(targetGroupId);
       
       if (groupBy !== 'none') {
-        if (expandedGroups.has(targetGroupId)) {
+        if (isExpandedMember) {
           // Flatten back to individual api node because the parent cluster is expanded
           groupId = String(node.id);
           groupName = node.name;
@@ -118,7 +298,9 @@ export default function ApiGraph() {
           apisInside: groupId === targetGroupId && groupBy !== 'none' ? [] : undefined,
           val: groupId === targetGroupId && groupBy !== 'none' ? 0 : 6,
           originalGroupId: targetGroupId, // link to parent for collapsing
-          originalGroupName: targetGroupName
+          originalGroupName: targetGroupName,
+          isClusterNode: groupId === targetGroupId && groupBy !== 'none',
+          isExpandedMember: isExpandedMember && groupId !== targetGroupId
         });
       }
       
@@ -179,6 +361,93 @@ export default function ApiGraph() {
     };
   }, [graphData, apis, groupBy, expandedGroups]);
 
+  const expandedClusterLayouts = useMemo(() => {
+    const groups = new Map<string, DisplayNode[]>();
+
+    displayGraphData.nodes.forEach((node: DisplayNode) => {
+      if (!node.isExpandedMember || !node.originalGroupId) return;
+
+      if (!groups.has(node.originalGroupId)) {
+        groups.set(node.originalGroupId, []);
+      }
+      groups.get(node.originalGroupId)?.push(node);
+    });
+
+    return new Map(
+      Array.from(groups.entries())
+        .map(([groupId, nodes]) => {
+          const layout = buildExpandedClusterLayout(nodes);
+          return layout ? [groupId, layout] : null;
+        })
+        .filter(Boolean) as Array<[string, ExpandedClusterLayout]>
+    );
+  }, [displayGraphData]);
+
+  const performanceMode = useMemo(() => {
+    const nodeCount = displayGraphData.nodes.length;
+    const linkCount = displayGraphData.links.length;
+    const isLargeGraph = nodeCount >= LARGE_GRAPH_NODE_THRESHOLD || linkCount >= LARGE_GRAPH_LINK_THRESHOLD;
+    const isVeryLargeGraph = nodeCount >= VERY_LARGE_GRAPH_NODE_THRESHOLD || linkCount >= VERY_LARGE_GRAPH_LINK_THRESHOLD;
+
+    return {
+      isLargeGraph,
+      isVeryLargeGraph,
+      collisionIterations: isVeryLargeGraph ? 3 : isLargeGraph ? 4 : 5,
+      alphaDecay: isVeryLargeGraph ? 0.09 : isLargeGraph ? 0.07 : 0.045,
+      velocityDecay: isVeryLargeGraph ? 0.4 : isLargeGraph ? 0.34 : 0.28,
+      cooldownTicks: isVeryLargeGraph ? 70 : isLargeGraph ? 95 : 140
+    };
+  }, [displayGraphData]);
+
+  const rememberNodePositions = useCallback(() => {
+    displayGraphData.nodes.forEach((node: DisplayNode) => {
+      if (!Number.isFinite(node.x) || !Number.isFinite(node.y)) return;
+
+      nodePositionsRef.current.set(node.id, { x: node.x as number, y: node.y as number });
+
+      if (node.isClusterNode) {
+        clusterAnchorsRef.current.set(node.id, { x: node.x as number, y: node.y as number });
+      }
+    });
+  }, [displayGraphData]);
+
+  useEffect(() => {
+    displayGraphData.nodes.forEach((node: DisplayNode) => {
+      if (node.isExpandedMember && node.originalGroupId) {
+        const anchor = clusterAnchorsRef.current.get(node.originalGroupId);
+        const layout = expandedClusterLayouts.get(node.originalGroupId);
+        const slot = layout?.slots.get(node.id);
+
+        if (anchor && slot) {
+          node.x = anchor.x + slot.x;
+          node.y = anchor.y + slot.y;
+          node.vx = 0;
+          node.vy = 0;
+          return;
+        }
+      }
+
+      if (node.isClusterNode) {
+        const anchor = clusterAnchorsRef.current.get(node.id);
+        if (anchor) {
+          node.x = anchor.x;
+          node.y = anchor.y;
+          node.vx = 0;
+          node.vy = 0;
+          return;
+        }
+      }
+
+      const previousPosition = nodePositionsRef.current.get(node.id);
+      if (previousPosition) {
+        node.x = previousPosition.x;
+        node.y = previousPosition.y;
+        node.vx = 0;
+        node.vy = 0;
+      }
+    });
+  }, [displayGraphData, expandedClusterLayouts]);
+
   useEffect(() => {
     if (fgRef.current) {
       const maxDegree = Math.max(1, ...displayGraphData.nodes.map((n: any) => n.degree || 0));
@@ -189,28 +458,30 @@ export default function ApiGraph() {
         return Math.max(20, Math.min(100, 100000 / (freq + 1000))); 
       });
 
-      // Prevents overlap perfectly with tighter margin
-      fgRef.current.d3Force('collide', forceCollide((node: any) => (node.val || 6) + 12).iterations(2));
+      // Stronger collision margin keeps circles separated even under dense cluster expansion.
+      fgRef.current.d3Force(
+        'collide',
+        forceCollide((node: DisplayNode) => getNodeRadius(node) + GLOBAL_COLLISION_PADDING)
+          .iterations(performanceMode.collisionIterations)
+      );
 
-      // Discrete Concentric Orbit Physics
+      // Discrete concentric orbit physics for non-expanded nodes.
       fgRef.current.d3Force('radial', forceRadial(
-        (node: any) => {
-          const invertedScore = 1 - ((node.degree || 0) / maxDegree);
-          
-          if (invertedScore < 0.15) return 0;         // Core Matrix (absolute center)
-          if (invertedScore < 0.4) return 90;         // Inner Orbit
-          if (invertedScore < 0.7) return 190;        // Middle Orbit
-          return 300;                                 // Outer Rim Orbit
-        },
+        (node: DisplayNode) => node.isExpandedMember ? Math.hypot(node.x || 0, node.y || 0) : getOrbitRadius(node, maxDegree),
         0, 0
-      ).strength(1.5)); // High strength snaps nodes tightly onto their designated ring tracks
+      ).strength((node: DisplayNode) => node.isExpandedMember ? 0 : 1.35));
 
-      // Drastically lower charge repulsion to prevent the graph from exploding outward
-      fgRef.current.d3Force('charge').strength(-30);
+      fgRef.current.d3Force(
+        'expandedCluster',
+        createExpandedClusterForce(Array.from(expandedClusterLayouts.values()), clusterAnchorsRef)
+      );
+
+      // Slightly stronger repulsion leaves more room for opened cluster boundaries.
+      fgRef.current.d3Force('charge').strength(-40);
 
       fgRef.current.d3ReheatSimulation();
     }
-  }, [displayGraphData, groupBy]);
+  }, [displayGraphData, groupBy, expandedClusterLayouts, performanceMode]);
 
   const handleNodeClick = useCallback((node: any) => {
     setSelectedNode(node);
@@ -345,13 +616,23 @@ export default function ApiGraph() {
             <Chip 
               key={gid} 
               label={gid} 
-              onDelete={() => setExpandedGroups(prev => { const n = new Set(prev); n.delete(gid); return n; })} 
+              onDelete={() => {
+                rememberNodePositions();
+                setExpandedGroups(prev => {
+                  const n = new Set(prev);
+                  n.delete(gid);
+                  return n;
+                });
+              }} 
               color="primary" 
               size="small" 
               variant="outlined" 
             />
           ))}
-          <Button size="small" variant="text" onClick={() => setExpandedGroups(new Set())}>Reset All</Button>
+          <Button size="small" variant="text" onClick={() => {
+            rememberNodePositions();
+            setExpandedGroups(new Set());
+          }}>Reset All</Button>
         </Box>
       )}
 
@@ -395,6 +676,10 @@ export default function ApiGraph() {
                       variant="outlined" color="primary" fullWidth sx={{ mt: 1, borderWidth: 2, '&:hover': { borderWidth: 2 } }}
                       startIcon={<AddCircleOutlineIcon />}
                       onClick={() => {
+                        rememberNodePositions();
+                        if (Number.isFinite(selectedNode.x) && Number.isFinite(selectedNode.y)) {
+                          clusterAnchorsRef.current.set(selectedNode.id, { x: selectedNode.x, y: selectedNode.y });
+                        }
                         setExpandedGroups(prev => new Set(prev).add(selectedNode.id));
                         setSelectedNode(null);
                       }}
@@ -422,6 +707,7 @@ export default function ApiGraph() {
                           variant="text" color="secondary" size="small" fullWidth sx={{ mt: 1 }}
                           startIcon={<LayersClearIcon />}
                           onClick={() => {
+                            rememberNodePositions();
                             setExpandedGroups(prev => {
                               const n = new Set(prev);
                               n.delete(selectedNode.originalGroupId);
@@ -508,6 +794,10 @@ export default function ApiGraph() {
           width={dimensions.width}
           height={dimensions.height}
           graphData={displayGraphData}
+          autoPauseRedraw
+          enableNodeDrag={false}
+          d3AlphaDecay={performanceMode.alphaDecay}
+          d3VelocityDecay={performanceMode.velocityDecay}
           nodeCanvasObject={paintNode}
           nodePointerAreaPaint={(node, color, ctx) => {
             const size = (node as any).val || 6;
@@ -519,14 +809,19 @@ export default function ApiGraph() {
           }}
           linkColor={() => 'rgba(148, 163, 184, 0.4)'}
           linkWidth={l => Math.max(1.5, Math.min(6, ((l as any).callFrequency || 1) / 10000))}
-          linkDirectionalParticles={l => (l.target as any).hasIssues ? 3 : 1}
+          linkDirectionalParticles={l => {
+            if (performanceMode.isVeryLargeGraph) return 0;
+            if (performanceMode.isLargeGraph) return (l.target as any).hasIssues ? 1 : 0;
+            return (l.target as any).hasIssues ? 3 : 1;
+          }}
           linkDirectionalParticleSpeed={l => Math.max(0.003, Math.min(0.02, ((l as any).callFrequency || 1) / 60000))}
-          linkDirectionalParticleWidth={l => Math.max(2, Math.min(4, ((l as any).callFrequency || 1) / 20000))}
+          linkDirectionalParticleWidth={l => performanceMode.isLargeGraph ? 1.5 : Math.max(2, Math.min(4, ((l as any).callFrequency || 1) / 20000))}
           linkDirectionalParticleColor={l => (l.target as any).hasIssues ? '#ef4444' : '#94a3b8'}
           linkLabel={l => `Call Vol: ${((l as any).callFrequency || 0).toLocaleString()} req/s`}
           onNodeClick={handleNodeClick}
           onBackgroundClick={handleBackgroundClick}
-          cooldownTicks={100}
+          onEngineStop={rememberNodePositions}
+          cooldownTicks={performanceMode.cooldownTicks}
         />
       </Box>
     </Box>

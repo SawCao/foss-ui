@@ -296,7 +296,7 @@ export default function WeeklyComparison() {
       </Card>
 
       <TableContainer component={Box} className="glass-panel">
-        <Table>
+        <Table key={groupBy}>
           <TableHead>
             <TableRow>
               <TableCell>{groupBy === 'none' ? 'API Name' : 'Aggregated Group'}</TableCell>
