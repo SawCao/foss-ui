@@ -1,4 +1,4 @@
-﻿import { useRef, useEffect, useState, useMemo, useCallback } from 'react';
+import { useRef, useEffect, useState, useMemo, useCallback } from 'react';
 import { Box, Typography, Card, CardContent, Tabs, Tab, IconButton, Divider, Button, Chip, CircularProgress } from '@mui/material';
 import ForceGraph2D from 'react-force-graph-2d';
 import { useStore } from '../store/useStore';
@@ -13,7 +13,6 @@ import OpenInNewIcon from '@mui/icons-material/OpenInNew';
 import AutoAwesomeIcon from '@mui/icons-material/AutoAwesome';
 import LayersClearIcon from '@mui/icons-material/LayersClear';
 import AddCircleOutlineIcon from '@mui/icons-material/AddCircleOutline';
-import { detectCommunities } from '../utils/louvain';
 import { forceCollide, forceRadial } from 'd3-force';
 
 const GLOBAL_COLLISION_PADDING = 14;
@@ -29,14 +28,8 @@ const VERY_LARGE_GRAPH_LINK_THRESHOLD = 700;
 const UNCLUSTERED_GROUP_ID = 'Unclustered';
 const AUTO_CLUSTER_OVERVIEW_PADDING = 140;
 const AUTO_CLUSTER_OVERVIEW_MAX_ZOOM = 0.95;
-const AUTO_CLUSTER_CACHE_STORAGE_KEY = 'api-topology:auto-cluster-cache:v1';
-
-type AutoClusterCachePayload = {
-  signature: string;
-  communities: Record<string, number>;
-};
-
-let inMemoryAutoClusterCache: AutoClusterCachePayload | null = null;
+const NODE_POINTER_HIT_PADDING = 12;
+const POINTER_CLICK_MOVE_TOLERANCE = 4;
 
 type DisplayNode = {
   id: string;
@@ -44,6 +37,7 @@ type DisplayNode = {
   hasIssues: boolean;
   size: number;
   val: number;
+  radius?: number;
   degree?: number;
   connectionCount?: number;
   apisInside?: string[];
@@ -77,7 +71,7 @@ type ClusterListItem = {
   level5?: string;
 };
 
-const getNodeRadius = (node: Partial<DisplayNode> | null | undefined) => Math.max(6, node?.val || 6);
+const getNodeRadius = (node: Partial<DisplayNode> | null | undefined) => Math.max(6, node?.radius || node?.val || 6);
 
 const getOrbitRadius = (node: Partial<DisplayNode>, maxDegree: number) => {
   const invertedScore = 1 - ((node.degree || 0) / maxDegree);
@@ -93,88 +87,6 @@ const formatClusterName = (groupId: string) => (
     ? UNCLUSTERED_GROUP_ID
     : groupId.replace(/^AI-Cluster-/, 'AI Cluster ')
 );
-
-const getAutoClusterGroupId = (
-  nodeId: string,
-  communities: Record<string, number>,
-  isolatedNodeIds: Set<string>
-) => {
-  if (isolatedNodeIds.has(nodeId)) {
-    return UNCLUSTERED_GROUP_ID;
-  }
-
-  return `AI-Cluster-${communities[nodeId] || 0}`;
-};
-
-const updateFnv1a = (hash: number, text: string) => {
-  let next = hash;
-  for (let i = 0; i < text.length; i += 1) {
-    next ^= text.charCodeAt(i);
-    next = Math.imul(next, 16777619);
-  }
-  return next >>> 0;
-};
-
-const buildAutoClusterSignature = (
-  apiNodeIds: string[],
-  edges: Array<{ source: string; target: string; weight: number }>
-) => {
-  let hash = 2166136261;
-
-  hash = updateFnv1a(hash, `n:${apiNodeIds.length}|e:${edges.length}|`);
-
-  apiNodeIds.forEach(nodeId => {
-    hash = updateFnv1a(hash, nodeId);
-    hash = updateFnv1a(hash, '|');
-  });
-
-  edges.forEach(edge => {
-    hash = updateFnv1a(hash, edge.source);
-    hash = updateFnv1a(hash, '>');
-    hash = updateFnv1a(hash, edge.target);
-    hash = updateFnv1a(hash, ':');
-    hash = updateFnv1a(hash, String(Math.max(1, edge.weight || 1)));
-    hash = updateFnv1a(hash, '|');
-  });
-
-  return `v1-${apiNodeIds.length}-${edges.length}-${hash.toString(16)}`;
-};
-
-const readAutoClusterCache = () => {
-  if (inMemoryAutoClusterCache) return inMemoryAutoClusterCache;
-  if (typeof window === 'undefined') return null;
-
-  try {
-    const raw = window.localStorage.getItem(AUTO_CLUSTER_CACHE_STORAGE_KEY);
-    if (!raw) return null;
-
-    const parsed = JSON.parse(raw) as AutoClusterCachePayload;
-    if (
-      !parsed
-      || typeof parsed.signature !== 'string'
-      || typeof parsed.communities !== 'object'
-      || parsed.communities === null
-    ) {
-      return null;
-    }
-
-    inMemoryAutoClusterCache = parsed;
-    return parsed;
-  } catch {
-    return null;
-  }
-};
-
-const writeAutoClusterCache = (payload: AutoClusterCachePayload) => {
-  inMemoryAutoClusterCache = payload;
-  if (typeof window === 'undefined') return;
-
-  try {
-    window.localStorage.setItem(AUTO_CLUSTER_CACHE_STORAGE_KEY, JSON.stringify(payload));
-  } catch {
-    // Ignore storage quota/private-mode errors and keep runtime behavior unchanged.
-  }
-};
 
 const buildExpandedClusterLayout = (nodes: DisplayNode[]): ExpandedClusterLayout | null => {
   if (nodes.length === 0) return null;
@@ -302,10 +214,26 @@ const createExpandedClusterForce = (
 export default function ApiGraph() {
   const { graphData, apis, isLoading } = useStore();
   const navigate = useNavigate();
-  const containerRef = useRef<HTMLDivElement>(null);
+  const observerRef = useRef<ResizeObserver | null>(null);
+  const containerRef = useCallback((node: HTMLDivElement | null) => {
+    if (observerRef.current) {
+      observerRef.current.disconnect();
+      observerRef.current = null;
+    }
+    if (node) {
+      observerRef.current = new ResizeObserver(entries => {
+        const { width, height } = entries[0].contentRect;
+        if (width > 0 && height > 0) {
+          setDimensions(prev => prev.width !== width || prev.height !== height ? { width, height } : prev);
+        }
+      });
+      observerRef.current.observe(node);
+    }
+  }, []);
   const fgRef = useRef<any>(null);
   const nodePositionsRef = useRef<Map<string, { x: number; y: number }>>(new Map());
   const clusterAnchorsRef = useRef<Map<string, ClusterAnchor>>(new Map());
+  const pointerDownRef = useRef<{ x: number; y: number; target: EventTarget | null } | null>(null);
   const [dimensions, setDimensions] = useState({ width: 800, height: 600 });
   const [groupBy, setGroupBy] = useState<'none' | 'autoCluster' | 'level4' | 'level5'>('autoCluster');
   const [selectedNode, setSelectedNode] = useState<any>(null);
@@ -317,28 +245,7 @@ export default function ApiGraph() {
     setShowAllDeps(false);
   }, [selectedNode]);
 
-  if (isLoading && apis.length === 0) {
-    return (
-      <Box sx={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '60vh', gap: 2 }}>
-        <CircularProgress size={60} />
-        <Typography variant="h6" color="text.secondary">Loading complex topology...</Typography>
-      </Box>
-    );
-  }
 
-  useEffect(() => {
-    const handleResize = () => {
-      if (containerRef.current) {
-        setDimensions({
-          width: containerRef.current.clientWidth,
-          height: containerRef.current.clientHeight
-        });
-      }
-    };
-    handleResize();
-    window.addEventListener('resize', handleResize);
-    return () => window.removeEventListener('resize', handleResize);
-  }, []);
 
   useEffect(() => {
     setSelectedNode(null);
@@ -354,96 +261,39 @@ export default function ApiGraph() {
   );
 
   const autoClusterData = useMemo(() => {
-    if (groupBy !== 'autoCluster') {
-      return {
-        communities: {} as Record<string, number>,
-        isolatedNodeIds: new Set<string>(),
-        clusterApiIds: new Map<string, string[]>(),
-        clusterMemberIds: new Map<string, string[]>()
-      };
-    }
-
-    const getLinkId = (nodeRef: any) => typeof nodeRef === 'object' ? nodeRef.id : nodeRef;
-    const apiNodes = graphData.nodes
-      .map(node => String(node.id))
-      .filter(nodeId => apiById.has(nodeId));
-    const nodeDegrees = new Map<string, number>(apiNodes.map(nodeId => [nodeId, 0]));
-    const edgesData = graphData.links
-      .map((l: any) => ({
-        source: String(getLinkId(l.source)),
-        target: String(getLinkId(l.target)),
-        weight: l.callFrequency || 1
-      }))
-      .filter(edge => (
-        edge.source !== edge.target
-        && apiById.has(edge.source)
-        && apiById.has(edge.target)
-      ));
-
-    edgesData.forEach(edge => {
-      const weight = Math.max(1, edge.weight || 1);
-      nodeDegrees.set(edge.source, (nodeDegrees.get(edge.source) || 0) + weight);
-      nodeDegrees.set(edge.target, (nodeDegrees.get(edge.target) || 0) + weight);
-    });
-
-    const isolatedNodeIds = new Set<string>();
-    graphData.nodes.forEach(node => {
-      const nodeId = String(node.id);
-      if (!apiById.has(nodeId) || (nodeDegrees.get(nodeId) || 0) === 0) {
-        isolatedNodeIds.add(nodeId);
-      }
-    });
-
-    const signature = buildAutoClusterSignature(apiNodes, edgesData);
-    const cached = readAutoClusterCache();
-    let communities: Record<string, number> | null = null;
-
-    if (cached && cached.signature === signature) {
-      const hasAllApiNodeAssignments = apiNodes.every(nodeId => typeof cached.communities[nodeId] === 'number');
-      if (hasAllApiNodeAssignments) {
-        communities = cached.communities;
-      }
-    }
-
-    if (!communities) {
-      communities = detectCommunities(apiNodes, edgesData);
-      writeAutoClusterCache({
-        signature,
-        communities
-      });
-    }
-
     const clusterApiIds = new Map<string, string[]>();
     const clusterMemberIds = new Map<string, string[]>();
 
-    graphData.nodes.forEach(node => {
-      const nodeId = String(node.id);
-      const groupId = getAutoClusterGroupId(nodeId, communities, isolatedNodeIds);
+    if (groupBy === 'autoCluster') {
+      graphData.nodes.forEach((node: any) => {
+        const nodeId = String(node.id);
+        const groupId = node.aiClusterId || UNCLUSTERED_GROUP_ID;
 
-      if (!clusterMemberIds.has(groupId)) {
-        clusterMemberIds.set(groupId, []);
-      }
-      clusterMemberIds.get(groupId)?.push(nodeId);
+        if (!clusterMemberIds.has(groupId)) {
+          clusterMemberIds.set(groupId, []);
+        }
+        clusterMemberIds.get(groupId)?.push(nodeId);
 
-      if (apiById.has(nodeId)) {
-        if (!clusterApiIds.has(groupId)) {
+        if (apiById.has(nodeId)) {
+          if (!clusterApiIds.has(groupId)) {
+            clusterApiIds.set(groupId, []);
+          }
+          clusterApiIds.get(groupId)?.push(nodeId);
+        } else if (!clusterApiIds.has(groupId)) {
           clusterApiIds.set(groupId, []);
         }
-        clusterApiIds.get(groupId)?.push(nodeId);
-      } else if (!clusterApiIds.has(groupId)) {
-        clusterApiIds.set(groupId, []);
-      }
-    });
-
-    clusterApiIds.forEach(apiIds => {
-      apiIds.sort((leftId, rightId) => {
-        const leftName = apiById.get(leftId)?.name || leftId;
-        const rightName = apiById.get(rightId)?.name || rightId;
-        return leftName.localeCompare(rightName);
       });
-    });
 
-    return { communities, isolatedNodeIds, clusterApiIds, clusterMemberIds };
+      clusterApiIds.forEach(apiIds => {
+        apiIds.sort((leftId, rightId) => {
+          const leftName = apiById.get(leftId)?.name || leftId;
+          const rightName = apiById.get(rightId)?.name || rightId;
+          return leftName.localeCompare(rightName);
+        });
+      });
+    }
+
+    return { clusterApiIds, clusterMemberIds };
   }, [groupBy, graphData, apiById]);
 
   useEffect(() => {
@@ -479,6 +329,7 @@ export default function ApiGraph() {
           hasIssues: node.hasIssues,
           size: 1,
           val: 6,
+          radius: 6,
           degree: 0,
           connectionCount: 0,
           isClusterNode: false,
@@ -521,7 +372,8 @@ export default function ApiGraph() {
       });
 
       finalNodes.forEach(node => {
-        node.val = Math.max(7, Math.min(30, 6 + (node.connectionCount || 0) * 2.5));
+        node.radius = Math.max(7, Math.min(30, 6 + (node.connectionCount || 0) * 2.5));
+        node.val = Math.pow(node.radius / 4, 2);
       });
 
       return {
@@ -530,14 +382,11 @@ export default function ApiGraph() {
       };
     }
 
-    const communities = groupBy === 'autoCluster' ? autoClusterData.communities : {};
-    const isolatedNodeIds = groupBy === 'autoCluster' ? autoClusterData.isolatedNodeIds : new Set<string>();
-
     const newNodes = new Map();
     const newLinks = new Map();
     const nodeIdToGroup = new Map();
 
-    graphData.nodes.forEach(node => {
+    graphData.nodes.forEach((node: any) => {
       const api = apiById.get(String(node.id));
       let groupId = String(node.id);
       let groupName = node.name;
@@ -545,7 +394,7 @@ export default function ApiGraph() {
       let targetGroupName = '';
       
       if (groupBy === 'autoCluster') {
-        targetGroupId = getAutoClusterGroupId(String(node.id), communities, isolatedNodeIds);
+        targetGroupId = node.aiClusterId || UNCLUSTERED_GROUP_ID;
         targetGroupName = formatClusterName(targetGroupId);
 
         // Keep isolated points out of the auto-cluster graph canvas.
@@ -584,6 +433,7 @@ export default function ApiGraph() {
           size: 0,
           apisInside: groupId === targetGroupId && groupBy !== 'none' ? [] : undefined,
           val: groupId === targetGroupId && groupBy !== 'none' ? 0 : 6,
+          radius: groupId === targetGroupId && groupBy !== 'none' ? 0 : 6,
           originalGroupId: targetGroupId, // link to parent for collapsing
           originalGroupName: targetGroupName,
           isClusterNode: groupId === targetGroupId && groupBy !== 'none',
@@ -594,7 +444,7 @@ export default function ApiGraph() {
       const g = newNodes.get(groupId);
       if (groupId === targetGroupId && groupBy !== 'none') {
         g.size += 1;
-        g.val = g.size * 2 + 5;
+        g.radius = g.size * 2 + 5;
         if (api) g.apisInside.push(api.id);
       }
       if (node.hasIssues) {
@@ -638,8 +488,9 @@ export default function ApiGraph() {
 
     finalNodes.forEach((n: any) => {
       if (!n.apisInside) {
-        n.val = Math.max(5, Math.min(28, 4 + n.connectionCount * 2.5));
+        n.radius = Math.max(5, Math.min(28, 4 + n.connectionCount * 2.5));
       }
+      n.val = Math.pow(n.radius / 4, 2);
     });
 
     return {
@@ -820,20 +671,97 @@ export default function ApiGraph() {
     }
   }, [displayGraphData, groupBy, expandedClusterLayouts, performanceMode]);
 
+  const findNodeByPointer = useCallback((event: MouseEvent) => {
+    if (!fgRef.current || displayGraphData.nodes.length === 0) return null;
+
+    let screenX: number | null = Number.isFinite(event.offsetX) ? event.offsetX : null;
+    let screenY: number | null = Number.isFinite(event.offsetY) ? event.offsetY : null;
+
+    if (screenX === null || screenY === null) {
+      const target = event.currentTarget as HTMLElement | null;
+      if (!target) return null;
+      const rect = target.getBoundingClientRect();
+      screenX = event.clientX - rect.left;
+      screenY = event.clientY - rect.top;
+    }
+
+    if (!Number.isFinite(screenX) || !Number.isFinite(screenY)) return null;
+
+    const point = fgRef.current.screen2GraphCoords(screenX, screenY);
+    let candidate: any = null;
+    let bestScore = Number.POSITIVE_INFINITY;
+
+    displayGraphData.nodes.forEach((node: DisplayNode) => {
+      if (!Number.isFinite(node.x) || !Number.isFinite(node.y)) return;
+
+      const dx = (node.x as number) - point.x;
+      const dy = (node.y as number) - point.y;
+      const distance = Math.hypot(dx, dy);
+      const hitRadius = getNodeRadius(node) + NODE_POINTER_HIT_PADDING;
+
+      if (distance > hitRadius) return;
+
+      const score = distance / Math.max(1, hitRadius);
+      if (score < bestScore) {
+        bestScore = score;
+        candidate = node;
+      }
+    });
+
+    return candidate;
+  }, [displayGraphData]);
+
   const handleNodeClick = useCallback((node: any) => {
     focusGraphNode(node);
   }, [focusGraphNode]);
 
-  const handleBackgroundClick = useCallback(() => {
-    setSelectedNode(null);
+  const handleGraphPointerDownCapture = useCallback((event: any) => {
+    if (!(event.target instanceof HTMLCanvasElement)) {
+      pointerDownRef.current = null;
+      return;
+    }
+
+    pointerDownRef.current = {
+      x: event.clientX,
+      y: event.clientY,
+      target: event.target
+    };
   }, []);
+
+  const handleGraphPointerUpCapture = useCallback((event: any) => {
+    const down = pointerDownRef.current;
+    pointerDownRef.current = null;
+
+    if (!down) return;
+    if (!(event.target instanceof HTMLCanvasElement)) return;
+    if (down.target !== event.target) return;
+
+    const moveDistance = Math.hypot(event.clientX - down.x, event.clientY - down.y);
+    if (moveDistance > POINTER_CLICK_MOVE_TOLERANCE) return;
+
+    const hitNode = findNodeByPointer(event.nativeEvent as MouseEvent);
+    if (!hitNode) {
+      setSelectedNode(null);
+    }
+  }, [findNodeByPointer]);
+
+  const paintNodePointerArea = useCallback(
+    (node: any, color: string, ctx: CanvasRenderingContext2D) => {
+      const size = Math.max(12, (node.radius || node.val || 6) + NODE_POINTER_HIT_PADDING);
+      ctx.beginPath();
+      ctx.arc(node.x, node.y, size, 0, 2 * Math.PI, false);
+      ctx.fillStyle = color;
+      ctx.fill();
+    },
+    []
+  );
 
   const paintNode = useCallback((node: any, ctx: CanvasRenderingContext2D, globalScale: number) => {
     const label = node.name;
     const isError = node.hasIssues;
     const isAggregated = node.apisInside !== undefined;
     const isSelected = selectedNode && selectedNode.id === node.id;
-    const size = node.val;
+    const size = node.radius || node.val || 6;
 
     const bgColor = isError ? '#fee2e2' : (isAggregated ? '#e0e7ff' : '#dcfce7');
     const strokeColor = isError ? '#ef4444' : (isAggregated ? '#6366f1' : '#10b981');
@@ -978,6 +906,15 @@ export default function ApiGraph() {
     };
   }, [selectedNode, displayGraphData]);
 
+  if (isLoading && apis.length === 0) {
+    return (
+      <Box sx={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '60vh', gap: 2 }}>
+        <CircularProgress size={60} />
+        <Typography variant="h6" color="text.secondary">Loading complex topology...</Typography>
+      </Box>
+    );
+  }
+
   const graphCanvas = (
     <Box
       className="glass-panel"
@@ -985,7 +922,7 @@ export default function ApiGraph() {
         flexGrow: 1,
         minWidth: 0,
         minHeight: 0,
-        height: isFocusedAutoClusterView ? { xs: 520, lg: '100%' } : 'auto',
+        height: '100%',
         overflow: 'hidden',
         borderRadius: 3,
         position: 'relative',
@@ -995,6 +932,8 @@ export default function ApiGraph() {
         backgroundSize: '24px 24px'
       }}
       ref={containerRef}
+      onPointerDownCapture={handleGraphPointerDownCapture}
+      onPointerUpCapture={handleGraphPointerUpCapture}
     >
       <Box sx={{ position: 'absolute', top: 16, left: 16, zIndex: 10, display: 'flex', flexDirection: 'column', gap: 1, bgcolor: 'rgba(255,255,255,0.9)', p: 0.5, borderRadius: 2, boxShadow: '0 4px 12px rgba(0,0,0,0.05)', border: '1px solid rgba(0,0,0,0.05)', backdropFilter: 'blur(8px)' }}>
         <IconButton size="small" onClick={() => fgRef.current?.zoom(fgRef.current.zoom() * 1.2, 400)}><ZoomInIcon /></IconButton>
@@ -1180,16 +1119,13 @@ export default function ApiGraph() {
         graphData={displayGraphData}
         autoPauseRedraw
         enableNodeDrag={false}
+        enablePanInteraction={(event: MouseEvent) => event.shiftKey}
         d3AlphaDecay={performanceMode.alphaDecay}
         d3VelocityDecay={performanceMode.velocityDecay}
         nodeCanvasObject={paintNode}
-        nodePointerAreaPaint={(node, color, ctx) => {
-          const size = (node as any).val || 6;
-          ctx.fillStyle = color;
-          ctx.beginPath();
-          ctx.arc(node.x, node.y, Math.max(size, 15), 0, 2 * Math.PI, false);
-          ctx.fill();
-        }}
+        nodePointerAreaPaint={paintNodePointerArea}
+        nodeRelSize={1}
+        nodeVal={(node: any) => Math.pow(node.radius || node.val || 6, 2)}
         linkColor={() => 'rgba(148, 163, 184, 0.4)'}
         linkWidth={l => Math.max(1.5, Math.min(6, ((l as any).callFrequency || 1) / 10000))}
         linkDirectionalParticles={l => {
@@ -1202,7 +1138,6 @@ export default function ApiGraph() {
         linkDirectionalParticleColor={l => (l.target as any).hasIssues ? '#ef4444' : '#94a3b8'}
         linkLabel={l => `Call Vol: ${((l as any).callFrequency || 0).toLocaleString()} req/s`}
         onNodeClick={handleNodeClick}
-        onBackgroundClick={handleBackgroundClick}
         onEngineStop={rememberNodePositions}
         cooldownTicks={performanceMode.cooldownTicks}
       />
@@ -1474,228 +1409,6 @@ export default function ApiGraph() {
       ) : (
         graphCanvas
       )}
-
-      {false && <Box className="glass-panel" sx={{ flexGrow: 1, overflow: 'hidden', borderRadius: 3, position: 'relative', bgcolor: '#ffffff', border: '1px solid rgba(0,0,0,0.08)', backgroundImage: 'radial-gradient(#e2e8f0 1px, transparent 0)', backgroundSize: '24px 24px' }} ref={containerRef}>
-        <Box sx={{ position: 'absolute', top: 16, left: 16, zIndex: 10, display: 'flex', flexDirection: 'column', gap: 1, bgcolor: 'rgba(255,255,255,0.9)', p: 0.5, borderRadius: 2, boxShadow: '0 4px 12px rgba(0,0,0,0.05)', border: '1px solid rgba(0,0,0,0.05)', backdropFilter: 'blur(8px)' }}>
-          <IconButton size="small" onClick={() => fgRef.current?.zoom(fgRef.current.zoom() * 1.2, 400)}><ZoomInIcon /></IconButton>
-          <Divider />
-          <IconButton size="small" onClick={() => fgRef.current?.zoom(fgRef.current.zoom() / 1.2, 400)}><ZoomOutIcon /></IconButton>
-          <Divider />
-          <IconButton size="small" onClick={() => { fgRef.current?.zoomToFit(800, 50); setSelectedNode(null); }}><FilterCenterFocusIcon /></IconButton>
-        </Box>
-
-        <Box sx={{ position: 'absolute', bottom: 16, left: 16, zIndex: 10, display: 'flex', gap: 2, bgcolor: 'rgba(255,255,255,0.9)', px: 2, py: 1.5, borderRadius: 2, boxShadow: '0 4px 12px rgba(0,0,0,0.05)', border: '1px solid rgba(0,0,0,0.05)', backdropFilter: 'blur(8px)' }}>
-          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}><CircleIcon sx={{ color: '#10b981', fontSize: 16 }} /><Typography variant="body2" fontWeight="500">Healthy</Typography></Box>
-          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}><CircleIcon sx={{ color: '#ef4444', fontSize: 16 }} /><Typography variant="body2" fontWeight="500">Alerting / Regressed</Typography></Box>
-          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}><Typography variant="body2" color="text.secondary" fontWeight="500" sx={{ ml: 1 }}>Dependency Flow</Typography></Box>
-        </Box>
-
-        {selectedNode && (
-          <Card sx={{ position: 'absolute', top: 16, right: 16, zIndex: 10, width: 320, borderRadius: 3, boxShadow: '0 8px 32px rgba(0,0,0,0.1)', border: '1px solid rgba(0,0,0,0.05)', animation: 'fadeIn 0.3s ease-out' }}>
-            <Box sx={{ bgcolor: selectedNode.hasIssues ? '#fee2e2' : '#f0fdf4', p: 2, display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', borderBottom: '1px solid', borderColor: selectedNode.hasIssues ? 'rgba(239,68,68,0.2)' : 'rgba(16,185,129,0.2)' }}>
-              <Box>
-                <Typography variant="caption" fontWeight="bold" color={selectedNode.hasIssues ? '#b91c1c' : '#047857'} sx={{ textTransform: 'uppercase', letterSpacing: 1 }}>
-                  {selectedNode.apisInside ? 'Aggregated Cluster' : 'Service Node'}
-                </Typography>
-                <Typography variant="h6" fontWeight="bold" sx={{ mt: 0.5, color: '#0f172a', lineHeight: 1.2 }}>{selectedNode.name}</Typography>
-              </Box>
-              <IconButton size="small" onClick={() => setSelectedNode(null)} sx={{ color: 'rgba(0,0,0,0.5)', mt: -0.5, mr: -0.5 }}><CloseIcon /></IconButton>
-            </Box>
-            <CardContent sx={{ p: 2.5 }}>
-              <Box sx={{ display: 'grid', gap: 2 }}>
-                
-                {/* Cluster Node Inspector */}
-                {selectedNode.apisInside && (
-                  <>
-                    <Box>
-                      <Typography variant="caption" color="text.secondary">Cluster Capacity</Typography>
-                      <Typography fontWeight="bold">{selectedNode.size} Internal Elements</Typography>
-                    </Box>
-                    <Box>
-                      <Typography variant="caption" color="text.secondary">APIs In Cluster</Typography>
-                      <Typography fontWeight="bold">{selectedClusterApis.length} API Records</Typography>
-                      <Box sx={{ mt: 1, maxHeight: 220, overflowY: 'auto', borderRadius: 2, border: '1px solid #e2e8f0', bgcolor: '#f8fafc' }}>
-                        {selectedClusterApis.length > 0 ? (
-                          selectedClusterApis.map(api => (
-                            <Box key={api.id} sx={{ px: 1.5, py: 1.1, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 1, borderBottom: '1px solid #e2e8f0', '&:last-of-type': { borderBottom: 'none' } }}>
-                              <Box sx={{ minWidth: 0 }}>
-                                <Typography variant="body2" fontWeight="bold" sx={{ color: '#0f172a', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                                  {api.name}
-                                </Typography>
-                                {(api.level4 || api.level5) && (
-                                  <Typography variant="caption" color="text.secondary" sx={{ display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                                    {[api.level4, api.level5].filter(Boolean).join(' / ')}
-                                  </Typography>
-                                )}
-                              </Box>
-                              <CircleIcon sx={{ color: api.hasIssues ? '#ef4444' : '#10b981', fontSize: 12, flexShrink: 0 }} />
-                            </Box>
-                          ))
-                        ) : (
-                          <Typography variant="caption" color="text.disabled" sx={{ display: 'block', px: 1.5, py: 1.25 }}>
-                            No API records were mapped into this cluster.
-                          </Typography>
-                        )}
-                      </Box>
-                    </Box>
-                    <Button 
-                      variant="outlined" color="primary" fullWidth sx={{ mt: 1, borderWidth: 2, '&:hover': { borderWidth: 2 } }}
-                      startIcon={<AddCircleOutlineIcon />}
-                      onClick={() => {
-                        if (groupBy === 'autoCluster') {
-                          setFocusedAutoClusterId(selectedNode.id);
-                          setSelectedNode(null);
-                          return;
-                        }
-
-                        rememberNodePositions();
-                        if (Number.isFinite(selectedNode.x) && Number.isFinite(selectedNode.y)) {
-                          clusterAnchorsRef.current.set(selectedNode.id, { x: selectedNode.x, y: selectedNode.y });
-                        }
-                        setExpandedGroups(prev => new Set(prev).add(selectedNode.id));
-                        setSelectedNode(null);
-                      }}
-                    >
-                      Unpack Cluster Topology
-                    </Button>
-                  </>
-                )}
-
-                {/* Individual API Node Inspector */}
-                {!selectedNode.apisInside && (
-                  <>
-                    <Box>
-                      <Typography variant="caption" color="text.secondary">Global State</Typography>
-                      <Typography fontWeight="bold" display="flex" alignItems="center" gap={1}>
-                        {selectedNode.hasIssues ? <><CircleIcon sx={{ color: '#ef4444', fontSize: 12 }} /> Warning Active</> : <><CircleIcon sx={{ color: '#10b981', fontSize: 12 }} /> Operational</>}
-                      </Typography>
-                    </Box>
-
-                    {selectedNode.originalGroupId && groupBy !== 'none' && expandedGroups.has(selectedNode.originalGroupId) && (
-                      <Box sx={{ p: 1.5, bgcolor: '#f8fafc', borderRadius: 2, border: '1px solid #e2e8f0' }}>
-                        <Typography variant="caption" color="text.secondary" display="block">Parent Boundary</Typography>
-                        <Typography fontWeight="bold" color="primary.main">{selectedNode.originalGroupName}</Typography>
-                        <Button 
-                          variant="text" color="secondary" size="small" fullWidth sx={{ mt: 1 }}
-                          startIcon={<LayersClearIcon />}
-                          onClick={() => {
-                            rememberNodePositions();
-                            setExpandedGroups(prev => {
-                              const n = new Set(prev);
-                              n.delete(selectedNode.originalGroupId);
-                              return n;
-                            });
-                            setSelectedNode(null);
-                          }}
-                        >
-                          Re-collapse Boundary
-                        </Button>
-                      </Box>
-                    )}
-
-                    {selectedApiMeta && (
-                      <Box>
-                        <Typography variant="caption" color="text.secondary">Architecture Layer</Typography>
-                        <Box sx={{ display: 'flex', gap: 0.5, flexWrap: 'wrap', mt: 0.5 }}>
-                          <Chip label={selectedApiMeta?.level4 || 'Unknown'} size="small" sx={{ bgcolor: 'rgba(0,0,0,0.05)', fontWeight: 'bold' }} />
-                          <Chip label={selectedApiMeta?.level5 || 'Unknown'} size="small" sx={{ bgcolor: 'rgba(0,0,0,0.05)', fontWeight: 'bold' }} />
-                        </Box>
-                      </Box>
-                    )}
-
-                    {!selectedNode.apisInside && (
-                      <>
-                        <Box sx={{ pt: 1 }}>
-                          <Typography variant="caption" color="text.secondary" display="block" sx={{ mb: 0.5 }}>Upstream (Callers)</Typography>
-                          {upstreams.length > 0 ? (
-                            <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.5 }}>
-                              {(showAllDeps ? upstreams : upstreams.slice(0, 3)).map((n: any) => (
-                                <Typography key={n.id} variant="body2" sx={{ fontSize: '0.75rem', color: '#0f172a' }}>鈥?{n.name}</Typography>
-                              ))}
-                              {!showAllDeps && upstreams.length > 3 && (
-                                <Typography variant="caption" color="primary" sx={{ cursor: 'pointer', fontWeight: 'bold' }} onClick={() => setShowAllDeps(true)}>
-                                  + {upstreams.length - 3} more...
-                                </Typography>
-                              )}
-                            </Box>
-                          ) : <Typography variant="caption" color="text.disabled">No inbound connections</Typography>}
-                        </Box>
-
-                        <Box sx={{ pt: 1 }}>
-                          <Typography variant="caption" color="text.secondary" display="block" sx={{ mb: 0.5 }}>Downstream (Dependencies)</Typography>
-                          {downstreams.length > 0 ? (
-                            <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.5 }}>
-                              {(showAllDeps ? downstreams : downstreams.slice(0, 3)).map((n: any) => (
-                                <Typography key={n.id} variant="body2" sx={{ fontSize: '0.75rem', color: '#0f172a' }}>鈥?{n.name}</Typography>
-                              ))}
-                              {!showAllDeps && downstreams.length > 3 && (
-                                <Typography variant="caption" color="primary" sx={{ cursor: 'pointer', fontWeight: 'bold' }} onClick={() => setShowAllDeps(true)}>
-                                  + {downstreams.length - 3} more...
-                                </Typography>
-                              )}
-                            </Box>
-                          ) : <Typography variant="caption" color="text.disabled">No outbound dependencies</Typography>}
-                        </Box>
-
-                        {showAllDeps && (
-                           <Typography variant="caption" color="text.secondary" sx={{ cursor: 'pointer', mt: 1, textAlign: 'center', display: 'block', '&:hover': { color: '#0f172a' } }} onClick={() => setShowAllDeps(false)}>
-                             Collapse List
-                           </Typography>
-                        )}
-                      </>
-                    )}
-                    
-                    {selectedApiMeta && (
-                      <Button 
-                        variant="contained" color="primary" fullWidth endIcon={<OpenInNewIcon />} sx={{ mt: 1 }}
-                        onClick={() => navigate(`/apis/${selectedNode.id}`)}
-                      >
-                        View API Trajectory
-                      </Button>
-                    )}
-                  </>
-                )}
-
-              </Box>
-            </CardContent>
-          </Card>
-        )}
-
-        <ForceGraph2D
-          ref={fgRef}
-          width={dimensions.width}
-          height={dimensions.height}
-          graphData={displayGraphData}
-          autoPauseRedraw
-          enableNodeDrag={false}
-          d3AlphaDecay={performanceMode.alphaDecay}
-          d3VelocityDecay={performanceMode.velocityDecay}
-          nodeCanvasObject={paintNode}
-          nodePointerAreaPaint={(node, color, ctx) => {
-            const size = (node as any).val || 6;
-            ctx.fillStyle = color;
-            ctx.beginPath();
-            // Increased hit area (min 15px radius) for better click reliability
-            ctx.arc(node.x, node.y, Math.max(size, 15), 0, 2 * Math.PI, false);
-            ctx.fill();
-          }}
-          linkColor={() => 'rgba(148, 163, 184, 0.4)'}
-          linkWidth={l => Math.max(1.5, Math.min(6, ((l as any).callFrequency || 1) / 10000))}
-          linkDirectionalParticles={l => {
-            if (performanceMode.isVeryLargeGraph) return 0;
-            if (performanceMode.isLargeGraph) return (l.target as any).hasIssues ? 1 : 0;
-            return (l.target as any).hasIssues ? 3 : 1;
-          }}
-          linkDirectionalParticleSpeed={l => Math.max(0.003, Math.min(0.02, ((l as any).callFrequency || 1) / 60000))}
-          linkDirectionalParticleWidth={l => performanceMode.isLargeGraph ? 1.5 : Math.max(2, Math.min(4, ((l as any).callFrequency || 1) / 20000))}
-          linkDirectionalParticleColor={l => (l.target as any).hasIssues ? '#ef4444' : '#94a3b8'}
-          linkLabel={l => `Call Vol: ${((l as any).callFrequency || 0).toLocaleString()} req/s`}
-          onNodeClick={handleNodeClick}
-          onBackgroundClick={handleBackgroundClick}
-          onEngineStop={rememberNodePositions}
-          cooldownTicks={performanceMode.cooldownTicks}
-        />
-      </Box>}
     </Box>
   );
 }

@@ -30,7 +30,7 @@ export default function Sidebar() {
     >
       <Box sx={{ p: 3, display: 'flex', alignItems: 'center', gap: 2 }}>
         <Box sx={{ flexShrink: 0 }}>
-          <img src="/hsbc-logo.png" alt="HSBC" style={{ width: 40, height: 'auto', display: 'block' }} />
+          <img src={`${import.meta.env.BASE_URL}hsbc-logo.png`} alt="HSBC" style={{ width: 40, height: 'auto', display: 'block' }} />
         </Box>
         <Typography variant="h6" fontWeight="bold" sx={{ color: '#b91c1c', fontSize: '0.85rem', lineHeight: 1.2 }}>
           API FOSS TRACKING

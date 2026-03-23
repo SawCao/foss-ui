@@ -1,4 +1,5 @@
 import Papa from 'papaparse';
+import aiClusters from './api_clusters.json';
 
 // We don't use ?raw here anymore so we can fetch them or import them dynamically
 const scanFilesGlob = import.meta.glob('./api_scan_*.csv', { query: '?raw', import: 'default', eager: false });
@@ -79,6 +80,7 @@ export interface GraphNode {
   name: string;
   group: number;
   hasIssues: boolean;
+  aiClusterId?: string;
 }
 
 export interface GraphLink {
@@ -289,6 +291,12 @@ export async function initializeMockData() {
         hasIssues: false
       });
     }
+  });
+
+  // 5. Assign auto clusters from pre-calculated JSON (simulating backend calculation)
+  const clustersMap = aiClusters as Record<string, string>;
+  graphNodes.forEach(node => {
+    node.aiClusterId = clustersMap[node.id] || 'Unclustered';
   });
 
   mockGraphData = {
